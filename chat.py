@@ -11,7 +11,7 @@ try:
 except ImportError:
     pass  # python-dotenv не установлен — читаем env напрямую
 
-API_URL = environ.get("API_URL", "https://api.openai.com/v1")
+API_URL = environ.get("API_URL", "https://api.openai.com/v1").removesuffix("/chat/completions")
 API_MODEL = environ.get("API_MODEL", "gpt-4")
 API_TOKEN = environ.get("API_TOKEN")
 
@@ -119,7 +119,9 @@ def main() -> None:
 
     while True:
         try:
-            user_input = input("Ты: ").strip()
+            raw = input("Ты: ")
+            # Фикс суррогатных символов (кривая кодировка терминала)
+            user_input = raw.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nПока!")
             break

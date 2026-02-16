@@ -196,6 +196,20 @@ class TestMain(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("Ошибка API", output)
 
+    @patch("builtins.input", side_effect=["\udcd1\udcbb\udcd0\udcb8\udcb2\udcd0\udcb5\udcd1\udc82", "quit"])
+    @patch("chat.API_TOKEN", "test-token")
+    def test_handles_surrogate_input(self, mock_input):
+        mock_client = make_mock_client(["ok"])
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
+
+        # Не должен упасть с UnicodeEncodeError
+        output = captured.getvalue()
+        self.assertIn("AI: ok", output)
+
     @patch("builtins.input", side_effect=KeyboardInterrupt)
     @patch("chat.API_TOKEN", "test-token")
     def test_handles_ctrl_c(self, mock_input):
@@ -208,6 +222,21 @@ class TestMain(unittest.TestCase):
 
         output = captured.getvalue()
         self.assertIn("Пока!", output)
+
+
+class TestConfig(unittest.TestCase):
+
+    @patch.dict("os.environ", {"API_URL": "https://api.openai.com/v1/chat/completions"})
+    def test_strips_chat_completions_suffix(self):
+        import importlib
+        importlib.reload(chat)
+        self.assertEqual(chat.API_URL, "https://api.openai.com/v1")
+
+    @patch.dict("os.environ", {"API_URL": "https://api.openai.com/v1"})
+    def test_keeps_clean_url(self):
+        import importlib
+        importlib.reload(chat)
+        self.assertEqual(chat.API_URL, "https://api.openai.com/v1")
 
 
 if __name__ == "__main__":
