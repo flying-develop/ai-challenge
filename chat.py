@@ -11,9 +11,19 @@ try:
 except ImportError:
     pass  # python-dotenv не установлен — читаем env напрямую
 
-API_URL = environ.get("API_URL", "https://api.openai.com/v1").removesuffix("/chat/completions")
+def normalize_base_url(url: str) -> str:
+    """Приводит API_URL к base URL, который ожидает OpenAI клиент."""
+    cleaned = url.strip().rstrip("/")
+
+    if cleaned.endswith("/chat/completions"):
+        cleaned = cleaned[: -len("/chat/completions")]
+
+    return cleaned
+
+
+API_URL = normalize_base_url(environ.get("API_URL", "https://api.openai.com/v1"))
 API_MODEL = environ.get("API_MODEL", "gpt-4")
-API_TOKEN = environ.get("API_TOKEN")
+API_TOKEN = environ.get("API_TOKEN") or environ.get("OPENAI_API_KEY")
 
 MAX_RETRIES = 4
 RETRY_BACKOFF = [2, 4, 8, 16]

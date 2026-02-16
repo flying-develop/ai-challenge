@@ -238,6 +238,18 @@ class TestConfig(unittest.TestCase):
         importlib.reload(chat)
         self.assertEqual(chat.API_URL, "https://api.openai.com/v1")
 
+    @patch.dict("os.environ", {"API_URL": "https://api.openai.com/v1/chat/completions/"})
+    def test_strips_chat_completions_with_trailing_slash(self):
+        import importlib
+        importlib.reload(chat)
+        self.assertEqual(chat.API_URL, "https://api.openai.com/v1")
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "fallback-key", "API_TOKEN": ""})
+    def test_fallback_to_openai_api_key_env(self):
+        import importlib
+        importlib.reload(chat)
+        self.assertEqual(chat.API_TOKEN, "fallback-key")
+
 
 if __name__ == "__main__":
     unittest.main()
