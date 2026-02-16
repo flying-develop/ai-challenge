@@ -1,131 +1,130 @@
-import json
 import io
 import sys
 import time
+import types
 import unittest
 from unittest.mock import patch, MagicMock
 
-import requests
+# --- Мокаем openai модуль до импорта chat ---
 
-import chat
+mock_openai = types.ModuleType("openai")
+
+mock_openai.OpenAI = MagicMock
+mock_openai.APIError = type("APIError", (Exception,), {
+    "__init__": lambda self, message="", response=None, body=None: (
+        setattr(self, "message", message) or
+        setattr(self, "response", response) or
+        setattr(self, "body", body) or
+        Exception.__init__(self, message)
+    ),
+})
+mock_openai.APIConnectionError = type("APIConnectionError", (Exception,), {
+    "__init__": lambda self, message="", request=None: (
+        setattr(self, "message", message) or
+        Exception.__init__(self, message)
+    ),
+})
+mock_openai.RateLimitError = type("RateLimitError", (mock_openai.APIError,), {})
+
+sys.modules["openai"] = mock_openai
+
+import chat  # noqa: E402 — после мока
+
+APIError = mock_openai.APIError
+APIConnectionError = mock_openai.APIConnectionError
+RateLimitError = mock_openai.RateLimitError
 
 
 # --- Helpers ---
 
-def make_sse_stream(tokens: list, done: bool = True) -> list:
-    """Создаёт список SSE-строк, имитируя стриминг OpenAI (decode_unicode=True)."""
-    lines = []
-    for token in tokens:
-        chunk = {
-            "choices": [{"delta": {"content": token}}]
-        }
-        lines.append(f"data: {json.dumps(chunk)}")
-        lines.append("")
-    if done:
-        lines.append("data: [DONE]")
-    return lines
+def make_chunk(token: str) -> MagicMock:
+    """Создаёт мок одного chunk-а стриминга."""
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta.content = token
+    return chunk
 
 
-def make_mock_response(tokens: list, status: int = 200) -> MagicMock:
-    """Мок requests.Response со стримингом."""
-    resp = MagicMock(spec=requests.Response)
-    resp.status_code = status
-    resp.raise_for_status = MagicMock()
-    if status >= 400:
-        resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
-            f"{status} Error"
-        )
-    resp.iter_lines = MagicMock(
-        return_value=iter(make_sse_stream(tokens))
-    )
-    return resp
+def make_mock_client(tokens: list) -> MagicMock:
+    """Мок OpenAI клиента, возвращающий стрим из токенов."""
+    client = MagicMock()
+    chunks = [make_chunk(t) for t in tokens]
+    client.chat.completions.create.return_value = iter(chunks)
+    return client
 
 
 # --- Tests: send_message ---
 
 class TestSendMessage(unittest.TestCase):
 
-    @patch("chat.request_with_retry")
-    def test_returns_full_reply(self, mock_req):
-        mock_req.return_value = make_mock_response(["Hello", " world", "!"])
+    def test_returns_full_reply(self):
+        client = make_mock_client(["Hello", " world", "!"])
 
-        result = chat.send_message([{"role": "user", "content": "hi"}])
+        result = chat.send_message(client, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(result, "Hello world!")
 
-    @patch("chat.request_with_retry")
-    def test_streams_tokens_to_stdout(self, mock_req):
-        mock_req.return_value = make_mock_response(["one", "two"])
+    def test_streams_tokens_to_stdout(self):
+        client = make_mock_client(["one", "two"])
 
         captured = io.StringIO()
         with patch("sys.stdout", captured):
-            chat.send_message([{"role": "user", "content": "hi"}])
+            chat.send_message(client, [{"role": "user", "content": "hi"}])
 
         output = captured.getvalue()
         self.assertIn("one", output)
         self.assertIn("two", output)
 
-    @patch("chat.request_with_retry")
-    def test_empty_response(self, mock_req):
-        mock_req.return_value = make_mock_response([])
+    def test_empty_response(self):
+        client = make_mock_client([])
 
-        result = chat.send_message([{"role": "user", "content": "hi"}])
+        result = chat.send_message(client, [{"role": "user", "content": "hi"}])
 
         self.assertEqual(result, "")
 
-    @patch("chat.request_with_retry")
-    def test_raises_on_api_error(self, mock_req):
-        mock_req.side_effect = requests.exceptions.HTTPError("500 Server Error")
+    def test_raises_on_api_error(self):
+        client = MagicMock()
+        client.chat.completions.create.side_effect = APIError(
+            message="Server Error",
+        )
 
-        with self.assertRaises(requests.exceptions.HTTPError):
-            chat.send_message([{"role": "user", "content": "hi"}])
-
-
-# --- Tests: request_with_retry ---
-
-class TestRequestWithRetry(unittest.TestCase):
-
-    @patch("requests.post")
-    def test_success_on_first_try(self, mock_post):
-        resp = make_mock_response(["ok"])
-        mock_post.return_value = resp
-
-        result = chat.request_with_retry("http://test", {}, {})
-
-        self.assertEqual(result, resp)
-        self.assertEqual(mock_post.call_count, 1)
+        with self.assertRaises(APIError):
+            chat.send_message(client, [{"role": "user", "content": "hi"}])
 
     @patch("time.sleep")
-    @patch("requests.post")
-    def test_retries_on_429(self, mock_post, mock_sleep):
-        resp_429 = MagicMock(spec=requests.Response)
-        resp_429.status_code = 429
+    def test_retries_on_rate_limit(self, mock_sleep):
+        client = MagicMock()
 
-        resp_ok = make_mock_response(["ok"])
+        rate_error = RateLimitError(message="Rate limit")
 
-        mock_post.side_effect = [resp_429, resp_429, resp_ok]
+        chunks = [make_chunk("ok")]
+        client.chat.completions.create.side_effect = [
+            rate_error,
+            rate_error,
+            iter(chunks),
+        ]
 
-        result = chat.request_with_retry("http://test", {}, {})
+        result = chat.send_message(client, [{"role": "user", "content": "hi"}])
 
-        self.assertEqual(result, resp_ok)
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(result, "ok")
+        self.assertEqual(client.chat.completions.create.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
 
     @patch("time.sleep")
-    @patch("requests.post")
-    def test_raises_after_max_retries(self, mock_post, mock_sleep):
-        resp_429 = MagicMock(spec=requests.Response)
-        resp_429.status_code = 429
-        resp_429.raise_for_status = MagicMock(
-            side_effect=requests.exceptions.HTTPError("429 Too Many Requests")
+    def test_raises_after_max_retries(self, mock_sleep):
+        client = MagicMock()
+
+        rate_error = RateLimitError(message="Rate limit")
+
+        client.chat.completions.create.side_effect = rate_error
+
+        with self.assertRaises(RateLimitError):
+            chat.send_message(client, [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(
+            client.chat.completions.create.call_count,
+            chat.MAX_RETRIES + 1,
         )
-
-        mock_post.return_value = resp_429
-
-        with self.assertRaises(requests.exceptions.HTTPError):
-            chat.request_with_retry("http://test", {}, {})
-
-        self.assertEqual(mock_post.call_count, chat.MAX_RETRIES + 1)
 
 
 # --- Tests: Spinner ---
@@ -157,9 +156,9 @@ class TestMain(unittest.TestCase):
     @patch("builtins.input", side_effect=["hi", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_chat_loop(self, mock_input):
-        with patch("chat.request_with_retry") as mock_req:
-            mock_req.return_value = make_mock_response(["Hello!"])
+        mock_client = make_mock_client(["Hello!"])
 
+        with patch("chat.create_client", return_value=mock_client):
             captured = io.StringIO()
             with patch("sys.stdout", captured):
                 chat.main()
@@ -171,20 +170,28 @@ class TestMain(unittest.TestCase):
     @patch("builtins.input", side_effect=["", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_skips_empty_input(self, mock_input):
-        captured = io.StringIO()
-        with patch("sys.stdout", captured):
-            chat.main()
+        mock_client = MagicMock()
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
 
         output = captured.getvalue()
         self.assertIn("Пока!", output)
 
-    @patch("chat.send_message", side_effect=requests.exceptions.HTTPError("500"))
     @patch("builtins.input", side_effect=["hi", "quit"])
     @patch("chat.API_TOKEN", "test-token")
-    def test_handles_api_error(self, mock_input, mock_send):  # noqa: ARG002
-        captured = io.StringIO()
-        with patch("sys.stdout", captured):
-            chat.main()
+    def test_handles_api_error(self, mock_input):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = APIError(
+            message="Server Error",
+        )
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
 
         output = captured.getvalue()
         self.assertIn("Ошибка API", output)
@@ -192,9 +199,12 @@ class TestMain(unittest.TestCase):
     @patch("builtins.input", side_effect=KeyboardInterrupt)
     @patch("chat.API_TOKEN", "test-token")
     def test_handles_ctrl_c(self, mock_input):
-        captured = io.StringIO()
-        with patch("sys.stdout", captured):
-            chat.main()
+        mock_client = MagicMock()
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
 
         output = captured.getvalue()
         self.assertIn("Пока!", output)
