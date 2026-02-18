@@ -147,12 +147,14 @@ class TestSpinner(unittest.TestCase):
 
 class TestMain(unittest.TestCase):
 
+    @patch("sys.argv", ["chat"])
     @patch("chat.API_TOKEN", None)
     def test_exits_without_token(self):
         with self.assertRaises(SystemExit) as ctx:
             chat.main()
         self.assertEqual(ctx.exception.code, 1)
 
+    @patch("sys.argv", ["chat"])
     @patch("builtins.input", side_effect=["hi", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_chat_loop(self, mock_input):
@@ -167,6 +169,7 @@ class TestMain(unittest.TestCase):
         self.assertIn("AI: Hello!", output)
         self.assertIn("Пока!", output)
 
+    @patch("sys.argv", ["chat"])
     @patch("builtins.input", side_effect=["", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_skips_empty_input(self, mock_input):
@@ -180,6 +183,7 @@ class TestMain(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("Пока!", output)
 
+    @patch("sys.argv", ["chat"])
     @patch("builtins.input", side_effect=["hi", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_handles_api_error(self, mock_input):
@@ -196,6 +200,7 @@ class TestMain(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("Ошибка API", output)
 
+    @patch("sys.argv", ["chat"])
     @patch("builtins.input", side_effect=["\udcd1\udcbb\udcd0\udcb8\udcb2\udcd0\udcb5\udcd1\udc82", "quit"])
     @patch("chat.API_TOKEN", "test-token")
     def test_handles_surrogate_input(self, mock_input):
@@ -210,6 +215,7 @@ class TestMain(unittest.TestCase):
         output = captured.getvalue()
         self.assertIn("AI: ok", output)
 
+    @patch("sys.argv", ["chat"])
     @patch("builtins.input", side_effect=KeyboardInterrupt)
     @patch("chat.API_TOKEN", "test-token")
     def test_handles_ctrl_c(self, mock_input):
@@ -237,6 +243,87 @@ class TestConfig(unittest.TestCase):
         import importlib
         importlib.reload(chat)
         self.assertEqual(chat.API_URL, "https://api.openai.com/v1")
+
+    @patch.dict("os.environ", {"SYSTEM_PROMPT": "Be concise."})
+    def test_system_prompt_loaded_from_env(self):
+        import importlib
+        importlib.reload(chat)
+        self.assertEqual(chat.SYSTEM_PROMPT, "Be concise.")
+
+    @patch.dict("os.environ", {}, clear=False)
+    def test_system_prompt_defaults_to_empty(self):
+        import importlib
+        env_without_sp = {k: v for k, v in __import__("os").environ.items()
+                          if k != "SYSTEM_PROMPT"}
+        with patch.dict("os.environ", env_without_sp, clear=True):
+            importlib.reload(chat)
+            self.assertEqual(chat.SYSTEM_PROMPT, "")
+
+
+class TestSystemPrompt(unittest.TestCase):
+    """Проверяем, что system message корректно добавляется в messages."""
+
+    @patch("sys.argv", ["chat", "--system", "You are a helpful assistant."])
+    @patch("builtins.input", side_effect=["hi", "quit"])
+    @patch("chat.API_TOKEN", "test-token")
+    def test_system_arg_prepends_system_message(self, mock_input):
+        """--system добавляет сообщение с role=system в начало диалога."""
+        mock_client = make_mock_client(["Hello!"])
+        sent_messages = []
+
+        def capture_create(**kwargs):
+            sent_messages.extend(kwargs.get("messages", []))
+            return iter([make_chunk("Hello!")])
+
+        mock_client.chat.completions.create.side_effect = capture_create
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
+
+        self.assertTrue(len(sent_messages) >= 2)
+        self.assertEqual(sent_messages[0]["role"], "system")
+        self.assertEqual(sent_messages[0]["content"], "You are a helpful assistant.")
+
+    @patch("sys.argv", ["chat"])
+    @patch("builtins.input", side_effect=["hi", "quit"])
+    @patch("chat.API_TOKEN", "test-token")
+    @patch("chat.SYSTEM_PROMPT", "")
+    def test_no_system_message_when_prompt_empty(self, mock_input):
+        """Если системный промпт не задан, сообщения начинаются с user."""
+        mock_client = make_mock_client(["Hello!"])
+        sent_messages = []
+
+        def capture_create(**kwargs):
+            sent_messages.extend(kwargs.get("messages", []))
+            return iter([make_chunk("Hello!")])
+
+        mock_client.chat.completions.create.side_effect = capture_create
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
+
+        self.assertTrue(len(sent_messages) >= 1)
+        self.assertEqual(sent_messages[0]["role"], "user")
+
+    @patch("sys.argv", ["chat"])
+    @patch("builtins.input", side_effect=["quit"])
+    @patch("chat.API_TOKEN", "test-token")
+    @patch("chat.SYSTEM_PROMPT", "Be brief.")
+    def test_system_prompt_env_shown_in_output(self, mock_input):
+        """Если SYSTEM_PROMPT задан в env, он выводится в заголовке."""
+        mock_client = MagicMock()
+
+        with patch("chat.create_client", return_value=mock_client):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                chat.main()
+
+        output = captured.getvalue()
+        self.assertIn("Be brief.", output)
 
 
 if __name__ == "__main__":

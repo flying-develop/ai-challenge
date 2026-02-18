@@ -1,5 +1,6 @@
 import sys
 import time
+import argparse
 import threading
 
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError
@@ -14,6 +15,7 @@ except ImportError:
 API_URL = environ.get("API_URL", "https://api.openai.com/v1").removesuffix("/chat/completions")
 API_MODEL = environ.get("API_MODEL", "gpt-4")
 API_TOKEN = environ.get("API_TOKEN")
+SYSTEM_PROMPT = environ.get("SYSTEM_PROMPT", "")
 
 MAX_RETRIES = 4
 RETRY_BACKOFF = [2, 4, 8, 16]
@@ -106,16 +108,31 @@ def send_message(client: OpenAI, messages: list[dict]) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Чат с OpenAI-совместимым API")
+    parser.add_argument(
+        "--system",
+        metavar="PROMPT",
+        default=SYSTEM_PROMPT,
+        help="Системный промпт (также задаётся через SYSTEM_PROMPT в .env)",
+    )
+    args = parser.parse_args()
+
     if not API_TOKEN:
         print("Ошибка: API_TOKEN не задан. Заполни .env файл (см. .env.example)")
         sys.exit(1)
 
     client = create_client()
 
+    system_prompt = args.system.strip()
+
     print(f"Чат с {API_MODEL} ({API_URL})")
+    if system_prompt:
+        print(f"Системный промпт: {system_prompt}")
     print("Введи сообщение. Для выхода: quit или Ctrl+C\n")
 
     messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
 
     while True:
         try:
