@@ -3,6 +3,9 @@
 Использование:
     python -m llm_agent.interfaces.cli.main --prompt "Привет, кто ты?"
     python -m llm_agent.interfaces.cli.main --interactive
+    python -m llm_agent.interfaces.cli.main --interactive --session work
+    python -m llm_agent.interfaces.cli.main --interactive --new-session
+    python -m llm_agent.interfaces.cli.main --list-sessions
 """
 
 from __future__ import annotations
@@ -14,13 +17,23 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 import httpx
 
 from llm_agent.application.agent import SimpleAgent
 from llm_agent.config import get_config
+from llm_agent.infrastructure.chat_history_repository import SQLiteChatHistoryRepository
 from llm_agent.infrastructure.qwen_client import QwenHttpClient
+
+# Путь к БД: можно переопределить через переменную окружения LLM_AGENT_DB_PATH
+_DEFAULT_DB_PATH = Path.home() / ".llm-agent" / "history.db"
+
+
+def _get_db_path() -> Path:
+    env_val = os.environ.get("LLM_AGENT_DB_PATH", "").strip()
+    return Path(env_val) if env_val else _DEFAULT_DB_PATH
 
 
 @contextmanager
@@ -74,6 +87,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Запустить интерактивную сессию (введите 'exit' или 'quit' для выхода).",
     )
+    mode.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="Показать список сохранённых сессий и выйти.",
+    )
+
+    parser.add_argument(
+        "--session",
+        metavar="NAME",
+        default="default",
+        help="Имя сессии для загрузки/сохранения истории (по умолчанию: 'default').",
+    )
+    parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Начать новую сессию, очистив историю перед стартом.",
+    )
     return parser
 
 
@@ -94,9 +124,19 @@ def run_single_shot(agent: SimpleAgent, prompt: str) -> None:
         sys.exit(1)
 
 
-def run_interactive(agent: SimpleAgent) -> None:
+def run_interactive(agent: SimpleAgent, history_count: int) -> None:
     """Запустить интерактивный цикл чата до выхода пользователя."""
-    print("Интерактивный режим. Введите 'exit'/'quit' для выхода, 'clear' для сброса истории.\n")
+    if history_count > 0:
+        print(
+            f"Загружена история: {history_count} сообщений. "
+            "Введите 'clear' для сброса истории.\n"
+        )
+    else:
+        print(
+            "Интерактивный режим. "
+            "Введите 'exit'/'quit' для выхода, 'clear' для сброса истории.\n"
+        )
+
     while True:
         try:
             raw = input("Вы: ")
@@ -140,6 +180,20 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    db_path = _get_db_path()
+
+    # --list-sessions не требует конфигурации API
+    if args.list_sessions:
+        with SQLiteChatHistoryRepository(db_path, session_id="default") as repo:
+            sessions = repo.list_sessions()
+        if not sessions:
+            print("Нет сохранённых сессий.")
+        else:
+            print("Сохранённые сессии:")
+            for s in sessions:
+                print(f"  • {s}")
+        return
+
     try:
         config = get_config()
     except ValueError as exc:
@@ -149,18 +203,28 @@ def main() -> None:
     # Читаем опциональный системный промпт из переменных окружения
     system_prompt = os.environ.get("QWEN_SYSTEM_PROMPT", "").strip() or None
 
-    with QwenHttpClient(
-        api_key=config["api_key"],
-        base_url=config["base_url"],
-        model=config["model"],
-        timeout=config["timeout"],
-    ) as client:
-        agent = SimpleAgent(llm_client=client, system_prompt=system_prompt)
+    session_id = args.session
+
+    with (
+        SQLiteChatHistoryRepository(db_path, session_id=session_id) as repo,
+        QwenHttpClient(
+            api_key=config["api_key"],
+            base_url=config["base_url"],
+            model=config["model"],
+            timeout=config["timeout"],
+        ) as client,
+    ):
+        # --new-session: очищаем историю перед стартом
+        if args.new_session:
+            repo.clear()
+
+        history_count = repo.message_count()
+        agent = SimpleAgent(llm_client=client, system_prompt=system_prompt, history_repo=repo)
 
         if args.prompt is not None:
             run_single_shot(agent, args.prompt)
         else:
-            run_interactive(agent)
+            run_interactive(agent, history_count)
 
 
 if __name__ == "__main__":

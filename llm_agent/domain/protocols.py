@@ -14,3 +14,24 @@ class LLMClientProtocol(Protocol):
     def generate(self, messages: list[ChatMessage]) -> LLMResponse:
         """Сгенерировать ответ для списка сообщений чата."""
         ...
+
+
+@runtime_checkable
+class ChatHistoryRepositoryProtocol(Protocol):
+    """Протокол хранилища истории чата.
+
+    Любой объект с методами load/append/clear удовлетворяет этому протоколу.
+    Позволяет заменять SQLite-реализацию любой другой (in-memory, файловой и т.д.).
+    """
+
+    def load(self) -> list[ChatMessage]:
+        """Загрузить все сообщения текущей сессии."""
+        ...
+
+    def append(self, message: ChatMessage) -> None:
+        """Добавить сообщение в хранилище."""
+        ...
+
+    def clear(self) -> None:
+        """Удалить все сообщения текущей сессии."""
+        ...
