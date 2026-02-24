@@ -1,34 +1,65 @@
-"""SimpleAgent: orchestrates LLM interactions."""
+"""SimpleAgent: оркестратор взаимодействий с LLM."""
 
 from __future__ import annotations
 
+from llm_agent.domain.models import ChatMessage
 from llm_agent.domain.protocols import LLMClientProtocol
 
 
 class SimpleAgent:
-    """Application-layer agent that delegates to an LLM client.
+    """Агент приложения, делегирующий запросы LLM-клиенту.
 
-    Accepts any object satisfying LLMClientProtocol (structural subtyping).
-    Does not know about HTTP, endpoints, or authentication — those details
-    belong to the infrastructure layer.
+    Хранит историю диалога между вызовами ask().
+    Принимает любой объект, удовлетворяющий LLMClientProtocol (структурная типизация).
+    Не знает об HTTP, эндпоинтах или аутентификации — эти детали
+    относятся к инфраструктурному слою.
     """
 
-    def __init__(self, llm_client: LLMClientProtocol) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClientProtocol,
+        system_prompt: str | None = None,
+    ) -> None:
         self._llm_client = llm_client
+        self._system_prompt = system_prompt.strip() if system_prompt else None
+        self._history: list[ChatMessage] = []
 
     def ask(self, prompt: str) -> str:
-        """Send a prompt and return the response text.
+        """Отправить сообщение, накопить историю и вернуть ответ модели.
+
+        Полный контекст разговора (системный промпт + история + новое сообщение)
+        передаётся LLM-клиенту при каждом вызове. Ответ ассистента добавляется
+        в историю, чтобы следующие вызовы имели полный контекст.
 
         Args:
-            prompt: The user's input. Must be non-empty after stripping whitespace.
+            prompt: Ввод пользователя. Не должен быть пустым после strip().
 
         Returns:
-            The model's response, stripped of leading/trailing whitespace.
+            Ответ модели, очищенный от ведущих/завершающих пробелов.
 
         Raises:
-            ValueError: If prompt is empty or whitespace-only.
+            ValueError: Если prompt пустой или состоит только из пробелов.
         """
         if not prompt.strip():
-            raise ValueError("Prompt must not be empty")
-        response = self._llm_client.generate(prompt)
-        return response.text.strip()
+            raise ValueError("Запрос не должен быть пустым")
+
+        # Добавляем сообщение пользователя в историю до вызова LLM
+        self._history.append(ChatMessage(role="user", content=prompt))
+
+        # Собираем полный список: системный промпт (если есть) + вся история
+        messages: list[ChatMessage] = []
+        if self._system_prompt:
+            messages.append(ChatMessage(role="system", content=self._system_prompt))
+        messages.extend(self._history)
+
+        response = self._llm_client.generate(messages)
+        reply_text = response.text.strip()
+
+        # Добавляем ответ ассистента в историю для следующего хода
+        self._history.append(ChatMessage(role="assistant", content=reply_text))
+
+        return reply_text
+
+    def clear_history(self) -> None:
+        """Сбросить историю диалога, сохранив системный промпт."""
+        self._history = []

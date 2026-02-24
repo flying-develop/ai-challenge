@@ -1,21 +1,22 @@
-"""HTTP adapter for the Qwen (Alibaba Cloud) LLM API.
+"""HTTP-адаптер для API Qwen (Alibaba Cloud).
 
-The endpoint URL can be changed via QWEN_BASE_URL without touching any
-business logic — this is the only file that knows about the HTTP wire format.
+URL эндпоинта можно изменить через QWEN_BASE_URL без затрагивания
+бизнес-логики — этот файл единственный, кто знает о HTTP-формате запросов.
 """
 
 from __future__ import annotations
 
 import httpx
 
-from llm_agent.domain.models import LLMResponse
+from llm_agent.domain.models import ChatMessage, LLMResponse
 
 
 class QwenHttpClient:
-    """Implements LLMClientProtocol against the Qwen HTTP API.
+    """Реализует LLMClientProtocol для HTTP API Qwen.
 
-    Uses httpx.Client (synchronous) with a single persistent connection pool.
-    Supports context-manager usage for deterministic resource cleanup.
+    Использует httpx.Client (синхронный) с единым пулом соединений.
+    Поддерживает использование как контекстный менеджер для детерминированного
+    освобождения ресурсов.
     """
 
     def __init__(
@@ -26,10 +27,9 @@ class QwenHttpClient:
         timeout: float = 30.0,
     ) -> None:
         self._model = model
-        # Ensure trailing slash so httpx merges relative paths correctly.
-        # httpx RFC 3986 resolution: a leading slash in the path means
-        # "absolute path from origin", dropping any base path prefix.
-        # Using base_url with trailing slash + relative path avoids this.
+        # Добавляем trailing slash, чтобы httpx корректно объединял пути.
+        # По RFC 3986: путь с ведущим слешем означает «абсолютный путь от origin»,
+        # что сбрасывает любой префикс base URL. Используем относительный путь.
         normalized_base = base_url.rstrip("/") + "/"
         self._client = httpx.Client(
             base_url=normalized_base,
@@ -40,23 +40,26 @@ class QwenHttpClient:
             timeout=timeout,
         )
 
-    def generate(self, prompt: str) -> LLMResponse:
-        """Send prompt to the Qwen API and return a structured response.
+    def generate(self, messages: list[ChatMessage]) -> LLMResponse:
+        """Отправить историю диалога в Qwen API и вернуть структурированный ответ.
 
         Args:
-            prompt: The user's input text.
+            messages: Полная история чата в виде списка ChatMessage.
+                      Ответственность за порядок лежит на вызывающем коде:
+                      системное сообщение первым (если есть), затем чередование
+                      user/assistant.
 
         Returns:
-            LLMResponse with the model's reply text, model name, and token usage.
+            LLMResponse с текстом ответа модели, именем модели и статистикой токенов.
 
         Raises:
-            httpx.HTTPStatusError: On non-2xx HTTP responses (includes status + body).
-            httpx.TimeoutException: When the request exceeds the configured timeout.
-            httpx.RequestError: On network connectivity failures.
+            httpx.HTTPStatusError: При HTTP-ответе с кодом не 2xx (включает статус и тело).
+            httpx.TimeoutException: Если запрос превысил настроенный таймаут.
+            httpx.RequestError: При сбоях сетевого соединения.
         """
         payload = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
         }
 
         response = self._client.post("chat/completions", json=payload)
@@ -65,13 +68,13 @@ class QwenHttpClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise httpx.HTTPStatusError(
-                f"Qwen API error {exc.response.status_code}: {exc.response.text}",
+                f"Ошибка Qwen API {exc.response.status_code}: {exc.response.text}",
                 request=exc.request,
                 response=exc.response,
             ) from exc
 
         data = response.json()
-        # Note: choices may be empty on content-moderation rejection (200 but no choices).
+        # Примечание: choices может быть пустым при блокировке контент-модерацией (200, но нет choices).
         choice = data["choices"][0]
         return LLMResponse(
             text=choice["message"]["content"],
@@ -80,7 +83,7 @@ class QwenHttpClient:
         )
 
     def close(self) -> None:
-        """Close the underlying HTTP connection pool."""
+        """Закрыть пул HTTP-соединений."""
         self._client.close()
 
     def __enter__(self) -> "QwenHttpClient":

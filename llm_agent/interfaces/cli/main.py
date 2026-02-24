@@ -1,13 +1,14 @@
-"""CLI entry point for the LLM agent.
+"""Точка входа CLI для LLM-агента.
 
-Usage:
-    python -m llm_agent.interfaces.cli.main --prompt "Hello, who are you?"
+Использование:
+    python -m llm_agent.interfaces.cli.main --prompt "Привет, кто ты?"
     python -m llm_agent.interfaces.cli.main --interactive
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import httpx
@@ -20,48 +21,48 @@ from llm_agent.infrastructure.qwen_client import QwenHttpClient
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-agent",
-        description="Chat with the Qwen LLM from the command line.",
+        description="Общение с Qwen LLM через командную строку.",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--prompt",
         metavar="TEXT",
-        help="Single-shot prompt (prints response and exits).",
+        help="Одиночный запрос (выводит ответ и завершает работу).",
     )
     mode.add_argument(
         "--interactive",
         action="store_true",
-        help="Start an interactive session (type 'exit' or 'quit' to stop).",
+        help="Запустить интерактивную сессию (введите 'exit' или 'quit' для выхода).",
     )
     return parser
 
 
 def run_single_shot(agent: SimpleAgent, prompt: str) -> None:
-    """Run a single prompt and print the response."""
+    """Выполнить одиночный запрос и вывести ответ."""
     try:
         print(agent.ask(prompt))
     except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Ошибка: {exc}", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as exc:
-        print(f"API error: {exc}", file=sys.stderr)
+        print(f"Ошибка API: {exc}", file=sys.stderr)
         sys.exit(1)
     except (httpx.TimeoutException, httpx.RequestError) as exc:
-        print(f"Network error: {exc}", file=sys.stderr)
+        print(f"Ошибка сети: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 def run_interactive(agent: SimpleAgent) -> None:
-    """Run an interactive chat loop until the user exits."""
-    print("Interactive mode. Type 'exit' or 'quit' to stop.\n")
+    """Запустить интерактивный цикл чата до выхода пользователя."""
+    print("Интерактивный режим. Введите 'exit'/'quit' для выхода, 'clear' для сброса истории.\n")
     while True:
         try:
-            raw = input("You: ")
+            raw = input("Вы: ")
         except (KeyboardInterrupt, EOFError):
-            print("\nGoodbye!")
+            print("\nДо свидания!")
             break
 
-        # Sanitize surrogate characters that some terminals produce
+        # Очищаем суррогатные символы, которые могут создавать некоторые терминалы
         user_input = (
             raw.encode("utf-8", errors="surrogateescape")
             .decode("utf-8", errors="replace")
@@ -72,18 +73,24 @@ def run_interactive(agent: SimpleAgent) -> None:
             continue
 
         if user_input.lower() in ("exit", "quit"):
-            print("Goodbye!")
+            print("До свидания!")
             break
+
+        # Команда сброса истории диалога
+        if user_input.lower() == "clear":
+            agent.clear_history()
+            print("История очищена.\n")
+            continue
 
         try:
             reply = agent.ask(user_input)
-            print(f"Agent: {reply}\n")
+            print(f"Агент: {reply}\n")
         except ValueError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(f"Ошибка: {exc}", file=sys.stderr)
         except httpx.HTTPStatusError as exc:
-            print(f"API error: {exc}", file=sys.stderr)
+            print(f"Ошибка API: {exc}", file=sys.stderr)
         except (httpx.TimeoutException, httpx.RequestError) as exc:
-            print(f"Network error: {exc}", file=sys.stderr)
+            print(f"Ошибка сети: {exc}", file=sys.stderr)
 
 
 def main() -> None:
@@ -93,8 +100,11 @@ def main() -> None:
     try:
         config = get_config()
     except ValueError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    # Читаем опциональный системный промпт из переменных окружения
+    system_prompt = os.environ.get("QWEN_SYSTEM_PROMPT", "").strip() or None
 
     with QwenHttpClient(
         api_key=config["api_key"],
@@ -102,7 +112,7 @@ def main() -> None:
         model=config["model"],
         timeout=config["timeout"],
     ) as client:
-        agent = SimpleAgent(llm_client=client)
+        agent = SimpleAgent(llm_client=client, system_prompt=system_prompt)
 
         if args.prompt is not None:
             run_single_shot(agent, args.prompt)

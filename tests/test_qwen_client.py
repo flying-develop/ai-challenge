@@ -1,4 +1,4 @@
-"""Tests for the infrastructure layer (QwenHttpClient)."""
+"""Тесты для инфраструктурного слоя (QwenHttpClient)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from llm_agent.domain.models import LLMResponse
+from llm_agent.domain.models import ChatMessage, LLMResponse
 from llm_agent.infrastructure.qwen_client import QwenHttpClient
 
 
@@ -32,7 +32,7 @@ SUCCESS_PAYLOAD = {
 
 
 def _make_mock_response(status_code: int, payload: dict) -> MagicMock:
-    """Build a mock httpx.Response-like object."""
+    """Создать mock-объект, имитирующий httpx.Response."""
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.status_code = status_code
     mock_resp.json.return_value = payload
@@ -56,7 +56,7 @@ def test_qwen_client_handles_success_response() -> None:
 
     with patch("httpx.Client.post", return_value=mock_resp):
         client = QwenHttpClient(api_key=API_KEY, base_url=BASE_URL, model=MODEL, timeout=5.0)
-        result = client.generate("Hello")
+        result = client.generate([ChatMessage(role="user", content="Hello")])
 
     assert isinstance(result, LLMResponse)
     assert result.text == "Hello, world!"
@@ -74,7 +74,7 @@ def test_qwen_client_raises_on_http_error() -> None:
     with patch("httpx.Client.post", return_value=mock_resp):
         client = QwenHttpClient(api_key=API_KEY, base_url=BASE_URL, model=MODEL, timeout=5.0)
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            client.generate("Hello")
+            client.generate([ChatMessage(role="user", content="Hello")])
 
     assert "401" in str(exc_info.value)
 
@@ -85,7 +85,7 @@ def test_qwen_client_raises_on_server_error() -> None:
     with patch("httpx.Client.post", return_value=mock_resp):
         client = QwenHttpClient(api_key=API_KEY, base_url=BASE_URL, model=MODEL, timeout=5.0)
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            client.generate("Hello")
+            client.generate([ChatMessage(role="user", content="Hello")])
 
     assert "500" in str(exc_info.value)
 
@@ -100,8 +100,37 @@ def test_qwen_client_sends_correct_model_in_body() -> None:
 
     with patch("httpx.Client.post", side_effect=capture_post):
         client = QwenHttpClient(api_key=API_KEY, base_url=BASE_URL, model=MODEL, timeout=5.0)
-        client.generate("test prompt")
+        client.generate([ChatMessage(role="user", content="test prompt")])
 
     body = captured_kwargs.get("json", {})
     assert body["model"] == MODEL
     assert body["messages"] == [{"role": "user", "content": "test prompt"}]
+
+
+def test_qwen_client_sends_full_message_history() -> None:
+    """Полная история диалога, включая системное сообщение, корректно сериализуется."""
+    mock_resp = _make_mock_response(200, SUCCESS_PAYLOAD)
+    captured_kwargs: dict = {}
+
+    def capture_post(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return mock_resp
+
+    messages = [
+        ChatMessage(role="system", content="Ты полезный ассистент."),
+        ChatMessage(role="user", content="Привет"),
+        ChatMessage(role="assistant", content="Здравствуйте!"),
+        ChatMessage(role="user", content="Как дела?"),
+    ]
+
+    with patch("httpx.Client.post", side_effect=capture_post):
+        client = QwenHttpClient(api_key=API_KEY, base_url=BASE_URL, model=MODEL, timeout=5.0)
+        client.generate(messages)
+
+    body = captured_kwargs.get("json", {})
+    assert body["messages"] == [
+        {"role": "system", "content": "Ты полезный ассистент."},
+        {"role": "user", "content": "Привет"},
+        {"role": "assistant", "content": "Здравствуйте!"},
+        {"role": "user", "content": "Как дела?"},
+    ]

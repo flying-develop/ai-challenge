@@ -1,16 +1,16 @@
-"""Structural protocols for dependency inversion."""
+"""Структурные протоколы для инверсии зависимостей."""
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from llm_agent.domain.models import LLMResponse
+from llm_agent.domain.models import ChatMessage, LLMResponse
 
 
 @runtime_checkable
 class LLMClientProtocol(Protocol):
-    """Any object with a generate() method satisfies this protocol."""
+    """Любой объект с методом generate() удовлетворяет этому протоколу."""
 
-    def generate(self, prompt: str) -> LLMResponse:
-        """Generate a response for the given prompt."""
+    def generate(self, messages: list[ChatMessage]) -> LLMResponse:
+        """Сгенерировать ответ для списка сообщений чата."""
         ...
