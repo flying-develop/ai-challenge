@@ -35,3 +35,16 @@ class ChatHistoryRepositoryProtocol(Protocol):
     def clear(self) -> None:
         """Удалить все сообщения текущей сессии."""
         ...
+
+
+@runtime_checkable
+class TokenCounterProtocol(Protocol):
+    """Любой объект, умеющий считать токены, удовлетворяет этому протоколу."""
+
+    def count_tokens(self, text: str) -> int:
+        """Подсчитать количество токенов в произвольном тексте."""
+        ...
+
+    def count_messages_tokens(self, messages: list[ChatMessage]) -> int:
+        """Подсчитать токены для списка сообщений в формате OpenAI chat."""
+        ...
