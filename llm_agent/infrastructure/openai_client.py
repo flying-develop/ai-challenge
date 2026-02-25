@@ -1,92 +1,99 @@
-"""HTTP-адаптер для OpenAI API (gpt-3.5-turbo и другие модели)."""
+"""Адаптер для OpenAI API через официальный SDK (openai>=1.0).
+
+Использует gpt-3.5-turbo — модель с контекстом 4096 токенов,
+что удобно для демонстрации переполнения контекста.
+
+Установка:
+    pip install openai tiktoken
+
+Конфигурация (в .env или переменных окружения):
+    OPENAI_API_KEY=sk-...
+    OPENAI_MODEL=gpt-3.5-turbo          # опционально
+    OPENAI_BASE_URL=https://...         # опционально (для совместимых API)
+"""
 
 from __future__ import annotations
 
-import httpx
+import os
+
+from openai import OpenAI
 
 from llm_agent.domain.models import ChatMessage, LLMResponse
 
-OPENAI_BASE_URL = "https://api.openai.com/v1/"
-
-# Лимиты контекстных окон для справки (в токенах)
+# Лимиты контекстных окон (токены)
 CONTEXT_LIMITS: dict[str, int] = {
     "gpt-3.5-turbo": 4096,
     "gpt-3.5-turbo-0301": 4096,
     "gpt-3.5-turbo-0613": 4096,
-    "gpt-3.5-turbo-16k": 16385,
-    "gpt-4": 8192,
-    "gpt-4-32k": 32768,
-    "gpt-4o": 128000,
+    "gpt-3.5-turbo-16k": 16_385,
+    "gpt-4": 8_192,
+    "gpt-4-32k": 32_768,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
 }
 
 
-class OpenAIHttpClient:
-    """Реализует LLMClientProtocol для OpenAI API.
+class OpenAIClient:
+    """Реализует LLMClientProtocol через официальный openai SDK.
 
-    Совместим с любым OpenAI-совместимым провайдером (Azure, Groq и т.д.)
-    — достаточно передать нужный base_url.
+    Автоматически читает OPENAI_API_KEY из окружения.
+    Можно передать кастомный base_url для совместимых API (Azure, Together, etc.)
     """
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         model: str = "gpt-3.5-turbo",
-        base_url: str = OPENAI_BASE_URL,
-        timeout: float = 30.0,
+        base_url: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self._model = model
-        normalized_base = base_url.rstrip("/") + "/"
-        self._client = httpx.Client(
-            base_url=normalized_base,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=timeout,
+        self._max_tokens = max_tokens
+
+        self._client = OpenAI(
+            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
+            base_url=base_url or os.environ.get("OPENAI_BASE_URL") or None,
         )
 
     @property
     def context_limit(self) -> int:
-        """Лимит контекста для текущей модели (0 если неизвестен)."""
+        """Лимит контекста для выбранной модели (0 если неизвестен)."""
         return CONTEXT_LIMITS.get(self._model, 0)
 
     def generate(self, messages: list[ChatMessage]) -> LLMResponse:
-        """Отправить историю диалога в OpenAI API и вернуть структурированный ответ.
+        """Отправить историю диалога в OpenAI API и вернуть ответ.
+
+        Args:
+            messages: Полная история чата. Системное сообщение (если есть)
+                      должно быть первым элементом с role='system'.
+
+        Returns:
+            LLMResponse с usage.prompt_tokens и usage.completion_tokens.
 
         Raises:
-            httpx.HTTPStatusError: При HTTP-ответе с кодом не 2xx.
-            httpx.TimeoutException: Если запрос превысил таймаут.
+            openai.AuthenticationError: При неверном API-ключе.
+            openai.RateLimitError: При превышении лимита запросов.
+            openai.BadRequestError: При context overflow (HTTP 400).
         """
-        payload = {
-            "model": self._model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-        }
+        oai_messages = [{"role": m.role, "content": m.content} for m in messages]
 
-        response = self._client.post("chat/completions", json=payload)
+        kwargs: dict = {"model": self._model, "messages": oai_messages}
+        if self._max_tokens is not None:
+            kwargs["max_tokens"] = self._max_tokens
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise httpx.HTTPStatusError(
-                f"Ошибка OpenAI API {exc.response.status_code}: {exc.response.text}",
-                request=exc.request,
-                response=exc.response,
-            ) from exc
+        response = self._client.chat.completions.create(**kwargs)
 
-        data = response.json()
-        choice = data["choices"][0]
+        choice = response.choices[0]
+        usage = {}
+        if response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
         return LLMResponse(
-            text=choice["message"]["content"],
-            model=data.get("model", self._model),
-            usage=data.get("usage", {}),
+            text=choice.message.content or "",
+            model=response.model,
+            usage=usage,
         )
-
-    def close(self) -> None:
-        """Закрыть пул HTTP-соединений."""
-        self._client.close()
-
-    def __enter__(self) -> "OpenAIHttpClient":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()
