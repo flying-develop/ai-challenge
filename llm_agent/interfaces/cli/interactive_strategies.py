@@ -42,6 +42,12 @@ import time
 from contextlib import contextmanager
 from typing import Generator
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from llm_agent.application.context_strategies import (
     BranchingStrategy,
     SlidingWindowStrategy,
