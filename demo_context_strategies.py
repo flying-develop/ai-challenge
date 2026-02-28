@@ -14,15 +14,22 @@
     - удобство для пользователя
 
 Запуск:
-    export QWEN_API_KEY=sk-...
-    python demo_context_strategies.py
+    python demo_context_strategies.py                        # авто-провайдер
+    python demo_context_strategies.py --provider qwen
+    python demo_context_strategies.py --provider openai --model gpt-4o-mini
+    python demo_context_strategies.py --provider claude --model claude-haiku-4-5-20251001
+    python demo_context_strategies.py --list-providers       # показать доступные
 
-Модель: Qwen (через QWEN_API_KEY / QWEN_BASE_URL / QWEN_MODEL).
+Конфигурация (.env):
+    QWEN_API_KEY=...       QWEN_MODEL=qwen-plus
+    OPENAI_API_KEY=sk-...  OPENAI_MODEL=gpt-4o-mini
+    ANTHROPIC_API_KEY=...  ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+    LLM_PROVIDER=qwen      # провайдер по умолчанию
 """
 
 from __future__ import annotations
 
-import os
+import argparse
 import sys
 import textwrap
 import time
@@ -40,9 +47,15 @@ from llm_agent.application.context_strategies import (
     StickyFactsStrategy,
 )
 from llm_agent.application.strategy_agent import StrategyAgent
-from llm_agent.config import get_config
 from llm_agent.domain.models import TokenUsage
-from llm_agent.infrastructure.qwen_client import QwenHttpClient
+from llm_agent.infrastructure.llm_factory import (
+    DEFAULT_MODELS,
+    PROVIDER_LABELS,
+    SUPPORTED_PROVIDERS,
+    build_client,
+    current_provider_from_env,
+    get_available_providers,
+)
 from llm_agent.infrastructure.token_counter import TiktokenCounter
 
 # ===========================================================================
@@ -256,7 +269,7 @@ def run_strategy(
 # Прогон 1: Sliding Window
 # ===========================================================================
 
-def run_sliding_window(client: QwenHttpClient) -> StrategyRunResult:
+def run_sliding_window(client) -> StrategyRunResult:
     header(f"СТРАТЕГИЯ 1: Sliding Window (окно = {WINDOW_SIZE} сообщений)")
     print(f"  Хранит только последние {WINDOW_SIZE} сообщений, остальное отбрасывает.")
 
@@ -282,7 +295,7 @@ def run_sliding_window(client: QwenHttpClient) -> StrategyRunResult:
 # Прогон 2: Sticky Facts
 # ===========================================================================
 
-def run_sticky_facts(client: QwenHttpClient) -> StrategyRunResult:
+def run_sticky_facts(client) -> StrategyRunResult:
     header(f"СТРАТЕГИЯ 2: Sticky Facts (окно = {FACTS_WINDOW_SIZE}, + facts)")
     print(f"  Извлекает ключевые факты после каждого обмена.")
     print(f"  В запрос отправляет: facts + последние {FACTS_WINDOW_SIZE} сообщений.")
@@ -320,7 +333,7 @@ def run_sticky_facts(client: QwenHttpClient) -> StrategyRunResult:
 # Прогон 3: Branching
 # ===========================================================================
 
-def run_branching(client: QwenHttpClient) -> StrategyRunResult:
+def run_branching(client) -> StrategyRunResult:
     header("СТРАТЕГИЯ 3: Branching (ветки диалога)")
     print("  Основной диалог → checkpoint → 2 ветки (подписка vs реклама).")
 
@@ -553,29 +566,65 @@ def print_comparison(
 # Точка входа
 # ===========================================================================
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="demo_context_strategies",
+        description="Сравнение стратегий управления контекстом на трёх LLM-провайдерах.",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=SUPPORTED_PROVIDERS,
+        default=None,
+        metavar="NAME",
+        help=f"LLM-провайдер: {' | '.join(SUPPORTED_PROVIDERS)} "
+             f"(по умолчанию: авто из LLM_PROVIDER или первый с ключом).",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="NAME",
+        help="Название модели (переопределяет переменную окружения).",
+    )
+    parser.add_argument(
+        "--list-providers",
+        action="store_true",
+        help="Показать доступные провайдеры и выйти.",
+    )
+    return parser
+
+
 def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.list_providers:
+        print("\nДоступные провайдеры:")
+        for info in get_available_providers():
+            status = "✓ доступен" if info["available"] else f"✗ нет {info['key_var']}"
+            print(f"  {info['provider']:8} — {info['label']:<30} {status}")
+            print(f"             модель по умолчанию: {info['default_model']}")
+        print()
+        return
+
+    provider = args.provider or current_provider_from_env()
+    model = args.model or DEFAULT_MODELS[provider]
+
     try:
-        config = get_config()
+        client = build_client(provider, model=model)
     except ValueError as exc:
         print(f"\n  ОШИБКА: {exc}")
-        return
+        sys.exit(1)
 
     print("\n" + "#" * WIDTH)
     print("  СРАВНЕНИЕ СТРАТЕГИЙ УПРАВЛЕНИЯ КОНТЕКСТОМ")
-    print(f"  Модель: {config['model']}")
+    print(f"  Провайдер: {provider}  ({PROVIDER_LABELS.get(provider, '')})")
+    print(f"  Модель: {model}")
     print(f"  Сценарий: сбор ТЗ для мобильного приложения ({len(SCENARIO_MESSAGES)} сообщений)")
     print(f"  Контрольные вопросы: {len(RECALL_QUESTIONS)}")
     print(f"  Sliding Window: N={WINDOW_SIZE}")
     print(f"  Sticky Facts: window={FACTS_WINDOW_SIZE}")
     print(f"  Branching: основной диалог + 2 ветки")
     print("#" * WIDTH)
-
-    client = QwenHttpClient(
-        api_key=config["api_key"],
-        base_url=config["base_url"],
-        model=config["model"],
-        timeout=config["timeout"],
-    )
 
     try:
         r_sliding = run_sliding_window(client)
@@ -589,7 +638,8 @@ def main() -> None:
         import traceback
         traceback.print_exc()
     finally:
-        client.close()
+        if hasattr(client, "close"):
+            client.close()
 
 
 if __name__ == "__main__":
