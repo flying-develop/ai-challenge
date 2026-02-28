@@ -5,12 +5,15 @@
 - StickyFactsStrategy
 - BranchingStrategy
 
-Поддерживает переключение стратегии на лету.
+Поддерживает переключение стратегии и LLM-провайдера на лету.
 """
 
 from __future__ import annotations
 
-from llm_agent.application.context_strategies import ContextStrategyProtocol
+from llm_agent.application.context_strategies import (
+    ContextStrategyProtocol,
+    StickyFactsStrategy,
+)
 from llm_agent.domain.models import ChatMessage, TokenUsage
 from llm_agent.domain.protocols import LLMClientProtocol, TokenCounterProtocol
 
@@ -31,11 +34,15 @@ class StrategyAgent:
         strategy: ContextStrategyProtocol,
         system_prompt: str | None = None,
         token_counter: TokenCounterProtocol | None = None,
+        provider_name: str = "qwen",
+        model_name: str = "",
     ) -> None:
         self._llm_client = llm_client
         self._strategy = strategy
         self._system_prompt = system_prompt.strip() if system_prompt else None
         self._token_counter = token_counter
+        self._provider_name = provider_name
+        self._model_name = model_name
         self._last_token_usage: TokenUsage | None = None
         self._turn: int = 0
         self._total_tokens_used: int = 0
@@ -55,6 +62,16 @@ class StrategyAgent:
         return self._strategy.name
 
     @property
+    def provider_name(self) -> str:
+        """Название текущего провайдера (qwen / openai / claude)."""
+        return self._provider_name
+
+    @property
+    def model_name(self) -> str:
+        """Название текущей модели."""
+        return self._model_name
+
+    @property
     def last_token_usage(self) -> TokenUsage | None:
         """Статистика токенов последнего вызова ask()."""
         return self._last_token_usage
@@ -70,8 +87,38 @@ class StrategyAgent:
         return self._total_tokens_used
 
     # ------------------------------------------------------------------
-    # Управление стратегией
+    # Управление стратегией и провайдером
     # ------------------------------------------------------------------
+
+    def switch_client(
+        self,
+        new_client: LLMClientProtocol,
+        provider_name: str = "",
+        model_name: str = "",
+    ) -> str:
+        """Переключить LLM-клиент (провайдер/модель) без сброса истории.
+
+        Если текущая стратегия — StickyFactsStrategy, её клиент тоже обновляется.
+
+        Args:
+            new_client: Новый LLM-клиент.
+            provider_name: Название провайдера (для отображения).
+            model_name: Название модели (для отображения).
+
+        Returns:
+            Строка описания переключения.
+        """
+        old = f"{self._provider_name}/{self._model_name}" if self._model_name else self._provider_name
+        self._llm_client = new_client
+        if provider_name:
+            self._provider_name = provider_name
+        if model_name:
+            self._model_name = model_name
+        # Обновляем клиент внутри StickyFactsStrategy (для извлечения фактов)
+        if isinstance(self._strategy, StickyFactsStrategy):
+            self._strategy._llm_client = new_client
+        new = f"{self._provider_name}/{self._model_name}" if self._model_name else self._provider_name
+        return f"{old} -> {new}"
 
     def switch_strategy(self, new_strategy: ContextStrategyProtocol) -> str:
         """Переключить стратегию управления контекстом.
@@ -162,6 +209,8 @@ class StrategyAgent:
     def get_stats(self) -> dict:
         """Получить полную статистику агента и стратегии."""
         stats = {
+            "provider": self._provider_name,
+            "model": self._model_name,
             "turn": self._turn,
             "total_tokens_used": self._total_tokens_used,
         }

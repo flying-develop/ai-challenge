@@ -5,7 +5,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "llm-agent"
 version = "0.1.0"
-description = "A CLI LLM agent backed by the Qwen API"
+description = "A CLI LLM agent with context strategies and multi-provider support (Qwen / OpenAI / Claude)"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
@@ -21,6 +21,7 @@ dev = [
 
 [project.scripts]
 llm-agent = "llm_agent.interfaces.cli.main:main"
+chat = "llm_agent.interfaces.cli.interactive_strategies:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
