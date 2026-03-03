@@ -63,6 +63,7 @@ from llm_agent.infrastructure.llm_factory import (
     get_available_providers,
 )
 from llm_agent.infrastructure.token_counter import TiktokenCounter
+from llm_agent.memory.manager import MemoryManager
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +137,15 @@ HELP_TEXT = """\
                            3 = Branching (ветки диалога)
   /stats                 — полная статистика агента
 
+ПАМЯТЬ (Memory Layers):
+  /memory                        — показать все 3 слоя памяти
+  /memory short|working|long     — показать конкретный слой
+  /remember working <текст>      — сохранить в рабочую память
+  /remember long <текст>         — сохранить в долговременную память
+  /forget working [id]           — удалить из рабочей (всё или по id)
+  /forget long [id]              — удалить из долговременной (всё или по id)
+  /promote working <id>          — переместить из рабочей в долговременную
+
 STICKY FACTS (стратегия 2):
   /facts                 — показать извлечённые факты
 
@@ -156,11 +166,23 @@ BRANCHING (стратегия 3):
 # Обработка команд
 # ---------------------------------------------------------------------------
 
+def _show_memory_layer(title: str, items: list, fmt_fn) -> None:
+    """Вспомогательная функция для отображения слоя памяти."""
+    print(f"\n  {title}:")
+    if not items:
+        print("    (пусто)")
+    else:
+        for item in items:
+            print(f"    {fmt_fn(item)}")
+    print()
+
+
 def handle_command(
     cmd: str,
     agent: StrategyAgent,
     strategies: dict,
     current_strategy_num: int,
+    memory_manager: MemoryManager | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     parts = cmd.strip().split()
@@ -362,9 +384,111 @@ def handle_command(
             print(f"  [{b_id}] {total} сообщ. {desc}{marker}")
         return current_strategy_num, True
 
+    # ---- Память (Memory Layers) ----
+    if command == "/memory":
+        if memory_manager is None:
+            print("Менеджер памяти не подключён.")
+            return current_strategy_num, True
+
+        layer = parts[1].lower() if len(parts) > 1 else None
+
+        if layer is None or layer == "short":
+            entries = memory_manager.get_short_term()
+            _show_memory_layer(
+                "SHORT-TERM (краткосрочная — текущий диалог)",
+                entries,
+                lambda e: f"[{e.ts}] {e.role}: {e.content[:80]}{'...' if len(e.content) > 80 else ''}",
+            )
+        if layer is None or layer == "working":
+            entries = memory_manager.get_working()
+            _show_memory_layer(
+                "WORKING (рабочая — текущая задача)",
+                entries,
+                lambda e: f"[id={e.id}] {e.key}: {e.value}",
+            )
+        if layer is None or layer == "long":
+            entries = memory_manager.get_long_term()
+            _show_memory_layer(
+                "LONG-TERM (долговременная — профиль и знания)",
+                entries,
+                lambda e: f"[id={e.id}] {e.key}: {e.value}"
+                + (f"  tags={e.tags}" if e.tags else ""),
+            )
+        if layer and layer not in ("short", "working", "long"):
+            print("Использование: /memory [short|working|long]")
+        return current_strategy_num, True
+
+    if command == "/remember":
+        if memory_manager is None:
+            print("Менеджер памяти не подключён.")
+            return current_strategy_num, True
+        if len(parts) < 3:
+            print("Использование: /remember working|long <текст>")
+            return current_strategy_num, True
+        layer = parts[1].lower()
+        text = " ".join(parts[2:])
+        # Автоматический ключ — первые 3 слова или "note"
+        words = text.split()
+        auto_key = "_".join(words[:3]).lower().rstrip(".,;:!?") if words else "note"
+        if layer == "working":
+            entry_id = memory_manager.add_to_working(auto_key, text)
+            print(f"Сохранено в WORKING [id={entry_id}]: {auto_key}: {text}")
+        elif layer == "long":
+            entry_id = memory_manager.add_to_long(auto_key, text)
+            print(f"Сохранено в LONG-TERM [id={entry_id}]: {auto_key}: {text}")
+        else:
+            print("Слой должен быть 'working' или 'long'.")
+        return current_strategy_num, True
+
+    if command == "/forget":
+        if memory_manager is None:
+            print("Менеджер памяти не подключён.")
+            return current_strategy_num, True
+        if len(parts) < 2:
+            print("Использование: /forget working|long [id]")
+            return current_strategy_num, True
+        layer = parts[1].lower()
+        entry_id = int(parts[2]) if len(parts) > 2 else None
+        if layer == "working":
+            count = memory_manager.remove_from_working(entry_id)
+            if entry_id:
+                print(f"Удалено из WORKING: {count} запись(ей) (id={entry_id}).")
+            else:
+                print(f"WORKING очищена: удалено {count} запись(ей).")
+        elif layer == "long":
+            count = memory_manager.remove_from_long(entry_id)
+            if entry_id:
+                print(f"Удалено из LONG-TERM: {count} запись(ей) (id={entry_id}).")
+            else:
+                print(f"LONG-TERM очищена: удалено {count} запись(ей).")
+        else:
+            print("Слой должен быть 'working' или 'long'.")
+        return current_strategy_num, True
+
+    if command == "/promote":
+        if memory_manager is None:
+            print("Менеджер памяти не подключён.")
+            return current_strategy_num, True
+        if len(parts) < 3:
+            print("Использование: /promote working <id>")
+            return current_strategy_num, True
+        layer = parts[1].lower()
+        try:
+            entry_id = int(parts[2])
+        except ValueError:
+            print("id должен быть числом.")
+            return current_strategy_num, True
+        try:
+            new_id = memory_manager.promote(layer, entry_id)
+            print(f"Запись {layer}#{entry_id} перемещена в LONG-TERM [id={new_id}].")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return current_strategy_num, True
+
+    # ---- Общие ----
     if command == "/clear":
         agent.clear_history()
-        print("История очищена.\n")
+        print("История очищена (working и long-term сохранены).\n")
         return current_strategy_num, True
 
     return current_strategy_num, False
@@ -387,6 +511,10 @@ def run_interactive(provider: str, model: str | None) -> None:
 
     token_counter = TiktokenCounter()
 
+    # Memory Layers
+    memory_db = os.path.join(os.path.expanduser("~"), ".llm-agent", "memory.db")
+    memory_manager = MemoryManager(memory_db)
+
     # Стратегии (StickyFacts получает тот же клиент для извлечения фактов)
     strategies: dict = {
         1: SlidingWindowStrategy(window_size=WINDOW_SIZE),
@@ -402,6 +530,7 @@ def run_interactive(provider: str, model: str | None) -> None:
         token_counter=token_counter,
         provider_name=provider,
         model_name=model_name,
+        memory_manager=memory_manager,
     )
 
     print("=" * 62)
@@ -438,7 +567,8 @@ def run_interactive(provider: str, model: str | None) -> None:
 
         if user_input.startswith("/"):
             current_strategy_num, handled = handle_command(
-                user_input, agent, strategies, current_strategy_num
+                user_input, agent, strategies, current_strategy_num,
+                memory_manager=memory_manager,
             )
             if handled:
                 continue
@@ -462,6 +592,8 @@ def run_interactive(provider: str, model: str | None) -> None:
             print(f"Ошибка: {exc}", file=sys.stderr)
         except Exception as exc:
             print(f"Ошибка API: {exc}", file=sys.stderr)
+
+    memory_manager.close()
 
 
 # ---------------------------------------------------------------------------
