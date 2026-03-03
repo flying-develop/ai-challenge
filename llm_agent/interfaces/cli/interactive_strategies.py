@@ -34,8 +34,10 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import itertools
 import os
+import shlex
 import sys
 import threading
 import time
@@ -64,6 +66,7 @@ from llm_agent.infrastructure.llm_factory import (
 )
 from llm_agent.infrastructure.token_counter import TiktokenCounter
 from llm_agent.memory.manager import MemoryManager
+from llm_agent.memory.profile_manager import ProfileManager
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,19 @@ HELP_TEXT = """\
   /forget long [id]              — удалить из долговременной (всё или по id)
   /promote working <id>          — переместить из рабочей в долговременную
 
+ПРОФИЛИ (Profiles):
+  /profile                              — активный профиль (все поля)
+  /profiles                             — список всех профилей
+  /profile show <name>                  — показать конкретный профиль
+  /profile use <name>                   — переключиться на профиль
+  /profile create <name> --interactive  — создать через вопросы (LLM генерирует prompt)
+  /profile create <name> --describe "…" — создать из описания (LLM генерирует prompt)
+  /profile edit <name>                  — редактировать system_prompt вручную
+  /profile edit <name> --describe "…"   — изменить system_prompt через LLM + diff
+  /profile delete <name>                — удалить (нельзя удалить активный)
+  /profile export <name>                — экспорт в JSON
+  /profile import                       — импорт из JSON (вводится в терминале)
+
 STICKY FACTS (стратегия 2):
   /facts                 — показать извлечённые факты
 
@@ -160,6 +176,350 @@ BRANCHING (стратегия 3):
   /help                  — эта справка
   exit / quit            — выход
 """
+
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции для профилей
+# ---------------------------------------------------------------------------
+
+def _safe_input(prompt: str = "") -> str:
+    """input() с корректной обработкой суррогатных символов (Windows/WSL terminal)."""
+    raw = input(prompt)
+    return raw.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
+def _generate_system_prompt(llm_client, description: str) -> str:
+    """Сгенерировать system prompt через LLM по текстовому описанию."""
+    from llm_agent.domain.models import ChatMessage
+    messages = [
+        ChatMessage(
+            role="user",
+            content=(
+                "Сформируй system prompt для AI-ассистента на основе этого описания. "
+                "Верни только текст system prompt, без пояснений, без кавычек.\n\n"
+                f"Описание: {description}"
+            ),
+        )
+    ]
+    response = llm_client.generate(messages)
+    return response.text.strip()
+
+
+def _modify_system_prompt(llm_client, current: str, instruction: str) -> str:
+    """Изменить существующий system prompt через LLM по инструкции."""
+    from llm_agent.domain.models import ChatMessage
+    messages = [
+        ChatMessage(
+            role="user",
+            content=(
+                f"Измени этот system prompt согласно инструкции. "
+                f"Верни только новый текст system prompt, без пояснений.\n\n"
+                f"Инструкция: {instruction}\n\n"
+                f"Текущий system prompt:\n{current}"
+            ),
+        )
+    ]
+    response = llm_client.generate(messages)
+    return response.text.strip()
+
+
+def _show_diff(old: str, new: str) -> None:
+    """Показать diff между старым и новым system prompt."""
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(old_lines, new_lines, fromfile="было", tofile="стало", lineterm=""))
+    if diff:
+        print("\n  Изменения:")
+        for line in diff:
+            if line.startswith("+") and not line.startswith("+++"):
+                print(f"    \033[32m{line}\033[0m")
+            elif line.startswith("-") and not line.startswith("---"):
+                print(f"    \033[31m{line}\033[0m")
+            else:
+                print(f"    {line}")
+    else:
+        print("  (изменений нет)")
+
+
+def _multiline_input(prompt_text: str = "") -> str:
+    """Ввод многострочного текста. Пустая строка завершает ввод."""
+    if prompt_text:
+        print(prompt_text)
+    print("  (введите текст; пустая строка завершает ввод)")
+    lines: list[str] = []
+    while True:
+        try:
+            line = _safe_input()
+        except EOFError:
+            break
+        if line.strip() == "":
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _print_profile(profile) -> None:
+    """Отобразить профиль в читаемом виде."""
+    active_mark = " ◄ активный" if profile.is_active else ""
+    print(f"\n  Профиль: {profile.name}{active_mark}")
+    print(f"  Название: {profile.display_name}")
+    print(f"  Создан: {profile.created_at}")
+    print(f"  Изменён: {profile.updated_at}")
+    print(f"  System prompt:\n{_indent(profile.system_prompt, '    ')}")
+    print()
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
+def _handle_profile_command(
+    parts: list[str],
+    agent,
+    profile_manager: ProfileManager,
+) -> None:
+    """Обработать /profile <subcommand> ..."""
+    if len(parts) == 1:
+        # /profile — показать активный
+        active = profile_manager.get_active()
+        if active:
+            _print_profile(active)
+        else:
+            print("Нет активного профиля. Используйте /profile use <name>.")
+        return
+
+    sub = parts[1].lower()
+
+    # /profile show <name>
+    if sub == "show":
+        if len(parts) < 3:
+            print("Использование: /profile show <name>")
+            return
+        profile = profile_manager.get(parts[2])
+        if profile:
+            _print_profile(profile)
+        else:
+            print(f"Профиль '{parts[2]}' не найден.")
+        return
+
+    # /profile use <name>
+    if sub == "use":
+        if len(parts) < 3:
+            print("Использование: /profile use <name>")
+            return
+        try:
+            p = profile_manager.set_active(parts[2])
+            print(f"Активный профиль: {p.name} ({p.display_name})")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    # /profile delete <name>
+    if sub == "delete":
+        if len(parts) < 3:
+            print("Использование: /profile delete <name>")
+            return
+        try:
+            profile_manager.delete(parts[2])
+            print(f"Профиль '{parts[2]}' удалён.")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    # /profile export <name>
+    if sub == "export":
+        if len(parts) < 3:
+            print("Использование: /profile export <name>")
+            return
+        try:
+            print(profile_manager.export_json(parts[2]))
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    # /profile import
+    if sub == "import":
+        print("Вставьте JSON профиля (пустая строка завершает ввод):")
+        lines: list[str] = []
+        while True:
+            try:
+                line = _safe_input()
+            except EOFError:
+                break
+            if line.strip() == "":
+                break
+            lines.append(line)
+        json_str = "\n".join(lines)
+        try:
+            p = profile_manager.import_json(json_str)
+            print(f"Профиль '{p.name}' импортирован.")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    # /profile create <name> --interactive | --describe "..."
+    if sub == "create":
+        if len(parts) < 3:
+            print("Использование: /profile create <name> --interactive | --describe \"...\"")
+            return
+        name = parts[2]
+        flags = parts[3:]
+
+        if "--interactive" in flags:
+            _profile_create_interactive(name, profile_manager, agent._llm_client)
+        elif "--describe" in flags:
+            idx = flags.index("--describe")
+            if idx + 1 >= len(flags):
+                print("Укажите описание: --describe \"текст\"")
+                return
+            description = flags[idx + 1]
+            _profile_create_describe(name, profile_manager, agent._llm_client, description)
+        else:
+            print("Укажите --interactive или --describe \"описание\"")
+        return
+
+    # /profile edit <name> [--describe "..."]
+    if sub == "edit":
+        if len(parts) < 3:
+            print("Использование: /profile edit <name> [--describe \"...\"]")
+            return
+        name = parts[2]
+        if name == profile_manager.DEFAULT_PROFILE:
+            print(f"Профиль '{profile_manager.DEFAULT_PROFILE}' является системным и не может быть изменён.")
+            return
+        flags = parts[3:]
+        profile = profile_manager.get(name)
+        if profile is None:
+            print(f"Профиль '{name}' не найден.")
+            return
+
+        if "--describe" in flags:
+            idx = flags.index("--describe")
+            if idx + 1 >= len(flags):
+                print("Укажите инструкцию: --describe \"что изменить\"")
+                return
+            instruction = flags[idx + 1]
+            _profile_edit_describe(name, profile, profile_manager, agent._llm_client, instruction)
+        else:
+            _profile_edit_interactive(name, profile, profile_manager)
+        return
+
+    print(f"Неизвестная подкоманда профиля: '{sub}'")
+    print("Используйте /help для списка команд.")
+
+
+def _profile_create_interactive(name: str, profile_manager: ProfileManager, llm_client) -> None:
+    """Создать профиль через серию вопросов."""
+    print(f"\nСоздаём профиль '{name}'. Ответьте на вопросы (Enter — пропустить):\n")
+    display_name = _safe_input("  Как называть этот профиль? ").strip() or name
+    language = _safe_input("  На каком языке отвечать? ").strip()
+    style = _safe_input("  Какой стиль общения предпочитаешь? ").strip()
+    dont_do = _safe_input("  Что ассистент НЕ должен делать? ").strip()
+    context = _safe_input("  Есть ли контекст о тебе, который важно знать? ").strip()
+
+    parts_desc: list[str] = []
+    if language:
+        parts_desc.append(f"Язык общения: {language}")
+    if style:
+        parts_desc.append(f"Стиль: {style}")
+    if dont_do:
+        parts_desc.append(f"Запрещено: {dont_do}")
+    if context:
+        parts_desc.append(f"Контекст о пользователе: {context}")
+
+    if not parts_desc:
+        print("Ни одного ответа не получено, создание отменено.")
+        return
+
+    description = "\n".join(parts_desc)
+    print("\n  Генерирую system prompt...")
+    system_prompt = _generate_system_prompt(llm_client, description)
+    print(f"\n  Сгенерированный system prompt:\n{_indent(system_prompt, '    ')}\n")
+
+    choice = _safe_input("  Сохранить? [y=да / e=редактировать / n=отмена]: ").strip().lower()
+    if choice == "y":
+        try:
+            profile_manager.create(name, display_name, system_prompt)
+            print(f"Профиль '{name}' сохранён.")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+    elif choice == "e":
+        new_prompt = _multiline_input(f"\n  Введите новый system prompt для '{name}':")
+        if new_prompt:
+            try:
+                profile_manager.create(name, display_name, new_prompt)
+                print(f"Профиль '{name}' сохранён.")
+            except ValueError as e:
+                print(f"Ошибка: {e}")
+        else:
+            print("Пустой prompt, создание отменено.")
+    else:
+        print("Создание отменено.")
+
+
+def _profile_create_describe(
+    name: str,
+    profile_manager: ProfileManager,
+    llm_client,
+    description: str,
+) -> None:
+    """Создать профиль по текстовому описанию через LLM."""
+    display_name = _safe_input(f"  Название профиля (Enter = '{name}'): ").strip() or name
+    print(f"\n  Генерирую system prompt для '{name}'...")
+    system_prompt = _generate_system_prompt(llm_client, description)
+    print(f"\n  Сгенерированный system prompt:\n{_indent(system_prompt, '    ')}\n")
+
+    choice = _safe_input("  Сохранить? [y=да / e=редактировать / n=отмена]: ").strip().lower()
+    if choice == "y":
+        try:
+            profile_manager.create(name, display_name, system_prompt)
+            print(f"Профиль '{name}' сохранён.")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+    elif choice == "e":
+        new_prompt = _multiline_input(f"\n  Введите новый system prompt для '{name}':")
+        if new_prompt:
+            try:
+                profile_manager.create(name, display_name, new_prompt)
+                print(f"Профиль '{name}' сохранён.")
+            except ValueError as e:
+                print(f"Ошибка: {e}")
+        else:
+            print("Пустой prompt, создание отменено.")
+    else:
+        print("Создание отменено.")
+
+
+def _profile_edit_interactive(name: str, profile, profile_manager: ProfileManager) -> None:
+    """Редактировать system_prompt профиля вручную."""
+    print(f"\n  Текущий system prompt для '{name}':\n{_indent(profile.system_prompt, '    ')}\n")
+    new_prompt = _multiline_input(f"  Введите новый system prompt:")
+    if new_prompt:
+        profile_manager.update(name, system_prompt=new_prompt)
+        print(f"Профиль '{name}' обновлён.")
+    else:
+        print("Пустой prompt, изменение отменено.")
+
+
+def _profile_edit_describe(
+    name: str,
+    profile,
+    profile_manager: ProfileManager,
+    llm_client,
+    instruction: str,
+) -> None:
+    """Изменить system_prompt профиля через LLM по инструкции."""
+    print(f"\n  Изменяю system prompt для '{name}'...")
+    new_prompt = _modify_system_prompt(llm_client, profile.system_prompt, instruction)
+    _show_diff(profile.system_prompt, new_prompt)
+    print(f"\n  Новый system prompt:\n{_indent(new_prompt, '    ')}\n")
+
+    choice = _safe_input("  Сохранить изменения? [y/n]: ").strip().lower()
+    if choice == "y":
+        profile_manager.update(name, system_prompt=new_prompt)
+        print(f"Профиль '{name}' обновлён.")
+    else:
+        print("Изменение отменено.")
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +543,16 @@ def handle_command(
     strategies: dict,
     current_strategy_num: int,
     memory_manager: MemoryManager | None = None,
+    profile_manager: ProfileManager | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
-    parts = cmd.strip().split()
+    try:
+        parts = shlex.split(cmd.strip())
+    except ValueError:
+        # Не сбалансированные кавычки — откатываемся к простому сплиту
+        parts = cmd.strip().split()
+    if not parts:
+        return current_strategy_num, False
     command = parts[0].lower()
 
     # ---- Справка ----
@@ -384,6 +751,29 @@ def handle_command(
             print(f"  [{b_id}] {total} сообщ. {desc}{marker}")
         return current_strategy_num, True
 
+    # ---- Профили ----
+    if command == "/profiles":
+        if profile_manager is None:
+            print("Менеджер профилей не подключён.")
+            return current_strategy_num, True
+        profiles = profile_manager.list_all()
+        if not profiles:
+            print("Профилей нет. Создайте: /profile create <name> --describe \"...\"")
+        else:
+            print(f"\n  Профили ({len(profiles)} шт.):")
+            for p in profiles:
+                marker = " ◄ активный" if p.is_active else ""
+                print(f"    [{p.name}] {p.display_name}{marker}")
+        print()
+        return current_strategy_num, True
+
+    if command == "/profile":
+        if profile_manager is None:
+            print("Менеджер профилей не подключён.")
+            return current_strategy_num, True
+        _handle_profile_command(parts, agent, profile_manager)
+        return current_strategy_num, True
+
     # ---- Память (Memory Layers) ----
     if command == "/memory":
         if memory_manager is None:
@@ -511,9 +901,10 @@ def run_interactive(provider: str, model: str | None) -> None:
 
     token_counter = TiktokenCounter()
 
-    # Memory Layers
+    # Memory Layers + Profiles (один и тот же DB-файл)
     memory_db = os.path.join(os.path.expanduser("~"), ".llm-agent", "memory.db")
     memory_manager = MemoryManager(memory_db)
+    profile_manager = ProfileManager(memory_db)
 
     # Стратегии (StickyFacts получает тот же клиент для извлечения фактов)
     strategies: dict = {
@@ -531,6 +922,7 @@ def run_interactive(provider: str, model: str | None) -> None:
         provider_name=provider,
         model_name=model_name,
         memory_manager=memory_manager,
+        profile_manager=profile_manager,
     )
 
     print("=" * 62)
@@ -546,7 +938,9 @@ def run_interactive(provider: str, model: str | None) -> None:
             branch_info = ""
             if isinstance(agent.strategy, BranchingStrategy):
                 branch_info = f" [{agent.strategy.current_branch_id}]"
-            prefix = f"[{agent.provider_name}|{current_strategy_num}]{branch_info}"
+            active_profile = profile_manager.get_active()
+            profile_info = f"|{active_profile.name}" if active_profile else ""
+            prefix = f"[{agent.provider_name}|{current_strategy_num}{profile_info}]{branch_info}"
             raw = input(f"{prefix} Вы: ")
         except (KeyboardInterrupt, EOFError):
             print("\nДо свидания!")
@@ -555,6 +949,7 @@ def run_interactive(provider: str, model: str | None) -> None:
         user_input = (
             raw.encode("utf-8", errors="surrogateescape")
             .decode("utf-8", errors="replace")
+            .replace("\ufffd", "")
             .strip()
         )
 
@@ -569,6 +964,7 @@ def run_interactive(provider: str, model: str | None) -> None:
             current_strategy_num, handled = handle_command(
                 user_input, agent, strategies, current_strategy_num,
                 memory_manager=memory_manager,
+                profile_manager=profile_manager,
             )
             if handled:
                 continue
@@ -594,6 +990,7 @@ def run_interactive(provider: str, model: str | None) -> None:
             print(f"Ошибка API: {exc}", file=sys.stderr)
 
     memory_manager.close()
+    profile_manager.close()
 
 
 # ---------------------------------------------------------------------------
