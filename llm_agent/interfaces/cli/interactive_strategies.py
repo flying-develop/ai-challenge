@@ -37,6 +37,7 @@ import argparse
 import difflib
 import itertools
 import os
+import readline  # noqa: F401 — подключает историю ввода (стрелки вверх/вниз)
 import shlex
 import sys
 import threading
@@ -67,6 +68,7 @@ from llm_agent.infrastructure.llm_factory import (
 from llm_agent.infrastructure.token_counter import TiktokenCounter
 from llm_agent.memory.manager import MemoryManager
 from llm_agent.memory.profile_manager import ProfileManager
+from llm_agent.tasks.orchestrator import TaskOrchestrator
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +172,17 @@ BRANCHING (стратегия 3):
   /branch <id> <cp_id>   — создать ветку от checkpoint-а
   /switch-branch <id>    — переключиться на ветку
   /branches              — список веток и checkpoint-ов
+
+ЗАДАЧИ (Task Orchestrator):
+  /task new "<название>"      — создать задачу, войти в planning
+  /task status                — текущее состояние (этап, шаг)
+  /task pause                 — приостановить задачу
+  /task resume                — продолжить с места паузы
+  /task next                  — подтвердить артефакт, перейти к следующей фазе
+  /task artifact              — показать артефакт текущей фазы
+  /task history               — завершённые фазы и артефакты
+  /task list                  — список всех задач
+  /task load <id>             — загрузить задачу по id
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -523,6 +536,101 @@ def _profile_edit_describe(
 
 
 # ---------------------------------------------------------------------------
+# Обработка команд задач (Task Orchestrator)
+# ---------------------------------------------------------------------------
+
+def _handle_task_command(parts: list[str], orchestrator: TaskOrchestrator) -> None:
+    """Обработка /task <подкоманда> ..."""
+    if len(parts) == 1:
+        if orchestrator.has_active_task:
+            print(orchestrator.get_status())
+        else:
+            print('Нет активной задачи. Используйте /task new "название".')
+        return
+
+    sub = parts[1].lower()
+
+    if sub == "new":
+        if len(parts) < 3:
+            print('Использование: /task new "название задачи"')
+            return
+        title = " ".join(parts[2:])
+        try:
+            task = orchestrator.create_task(title)
+            print(f'\n  Задача #{task.id} создана: "{task.title}"')
+            print(f"  Фаза: {task.status.value}")
+            print("  Опишите задачу подробнее, чтобы LLM составил план.\n")
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    if sub == "status":
+        print(orchestrator.get_status())
+        return
+
+    if sub == "pause":
+        try:
+            msg = orchestrator.pause_task()
+            print(msg)
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    if sub == "resume":
+        try:
+            msg = orchestrator.resume_task()
+            print(msg)
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    if sub == "next":
+        try:
+            msg = orchestrator.next_phase()
+            print(msg)
+        except ValueError as e:
+            print(f"Ошибка: {e}")
+        return
+
+    if sub == "artifact":
+        print(orchestrator.get_artifact())
+        return
+
+    if sub == "history":
+        print(orchestrator.get_history())
+        return
+
+    if sub == "list":
+        tasks = orchestrator.list_tasks()
+        if not tasks:
+            print("Задач нет.")
+        else:
+            print(f"\n  Задачи ({len(tasks)} шт.):")
+            for t in tasks:
+                active_mark = ""
+                if orchestrator.active_task and orchestrator.active_task.id == t.id:
+                    active_mark = " << активная"
+                print(f"    [#{t.id}] {t.title} ({t.status.value}){active_mark}")
+            print()
+        return
+
+    if sub == "load":
+        if len(parts) < 3:
+            print("Использование: /task load <id>")
+            return
+        try:
+            task_id = int(parts[2])
+            task = orchestrator.load_task(task_id)
+            print(f'Загружена задача #{task.id}: "{task.title}" ({task.status.value})')
+        except (ValueError, TypeError) as e:
+            print(f"Ошибка: {e}")
+        return
+
+    print(f"Неизвестная подкоманда задачи: '{sub}'")
+    print("Используйте /help для списка команд.")
+
+
+# ---------------------------------------------------------------------------
 # Обработка команд
 # ---------------------------------------------------------------------------
 
@@ -544,6 +652,7 @@ def handle_command(
     current_strategy_num: int,
     memory_manager: MemoryManager | None = None,
     profile_manager: ProfileManager | None = None,
+    task_orchestrator: TaskOrchestrator | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     try:
@@ -875,6 +984,14 @@ def handle_command(
             print(f"Ошибка: {e}")
         return current_strategy_num, True
 
+    # ---- Задачи (Task Orchestrator) ----
+    if command == "/task":
+        if task_orchestrator is None:
+            print("Task Orchestrator не подключён.")
+            return current_strategy_num, True
+        _handle_task_command(parts, task_orchestrator)
+        return current_strategy_num, True
+
     # ---- Общие ----
     if command == "/clear":
         agent.clear_history()
@@ -925,6 +1042,11 @@ def run_interactive(provider: str, model: str | None) -> None:
         profile_manager=profile_manager,
     )
 
+    # Task Orchestrator (тот же DB-файл)
+    task_orchestrator = TaskOrchestrator(
+        db_path=memory_db, agent=agent, memory_manager=memory_manager,
+    )
+
     print("=" * 62)
     print("  LLM-агент: стратегии контекста + выбор провайдера")
     print("=" * 62)
@@ -940,7 +1062,11 @@ def run_interactive(provider: str, model: str | None) -> None:
                 branch_info = f" [{agent.strategy.current_branch_id}]"
             active_profile = profile_manager.get_active()
             profile_info = f"|{active_profile.name}" if active_profile else ""
-            prefix = f"[{agent.provider_name}|{current_strategy_num}{profile_info}]{branch_info}"
+            task_info = ""
+            if task_orchestrator.has_active_task:
+                t = task_orchestrator.active_task
+                task_info = f"|T:{t.status.value}"
+            prefix = f"[{agent.provider_name}|{current_strategy_num}{profile_info}{task_info}]{branch_info}"
             raw = input(f"{prefix} Вы: ")
         except (KeyboardInterrupt, EOFError):
             print("\nДо свидания!")
@@ -965,13 +1091,17 @@ def run_interactive(provider: str, model: str | None) -> None:
                 user_input, agent, strategies, current_strategy_num,
                 memory_manager=memory_manager,
                 profile_manager=profile_manager,
+                task_orchestrator=task_orchestrator,
             )
             if handled:
                 continue
 
         try:
             with spinner():
-                reply = agent.ask(user_input)
+                if task_orchestrator.has_active_task:
+                    reply = task_orchestrator.handle_message(user_input)
+                else:
+                    reply = agent.ask(user_input)
 
             print(f"Агент: {reply}")
 
@@ -989,6 +1119,7 @@ def run_interactive(provider: str, model: str | None) -> None:
         except Exception as exc:
             print(f"Ошибка API: {exc}", file=sys.stderr)
 
+    task_orchestrator.close()
     memory_manager.close()
     profile_manager.close()
 

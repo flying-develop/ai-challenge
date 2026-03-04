@@ -148,6 +148,15 @@ class MemoryManager:
         self._conn.commit()
         return cur.rowcount
 
+    def remove_working_by_key_prefix(self, prefix: str) -> int:
+        """Удалить записи рабочей памяти, чей key начинается с prefix."""
+        cur = self._conn.execute(
+            "DELETE FROM working_memory WHERE key LIKE ?",
+            (prefix + "%",),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     # ------------------------------------------------------------------
     # LONG-TERM MEMORY
     # ------------------------------------------------------------------
