@@ -21,6 +21,7 @@ from llm_agent.domain.protocols import LLMClientProtocol, TokenCounterProtocol
 
 if TYPE_CHECKING:
     from llm_agent.memory.manager import MemoryManager
+    from llm_agent.memory.profile_manager import ProfileManager
 
 
 class StrategyAgent:
@@ -42,6 +43,7 @@ class StrategyAgent:
         provider_name: str = "qwen",
         model_name: str = "",
         memory_manager: MemoryManager | None = None,
+        profile_manager: ProfileManager | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._strategy = strategy
@@ -50,6 +52,7 @@ class StrategyAgent:
         self._provider_name = provider_name
         self._model_name = model_name
         self._memory_manager = memory_manager
+        self._profile_manager = profile_manager
         self._last_token_usage: TokenUsage | None = None
         self._turn: int = 0
         self._total_tokens_used: int = 0
@@ -97,6 +100,11 @@ class StrategyAgent:
     def memory_manager(self) -> MemoryManager | None:
         """Менеджер памяти (если подключён)."""
         return self._memory_manager
+
+    @property
+    def profile_manager(self) -> ProfileManager | None:
+        """Менеджер профилей (если подключён)."""
+        return self._profile_manager
 
     # ------------------------------------------------------------------
     # Управление стратегией и провайдером
@@ -174,14 +182,22 @@ class StrategyAgent:
         user_msg = ChatMessage(role="user", content=prompt)
         self._strategy.add_message(user_msg)
 
-        # 2. Строим запрос через стратегию (с учётом памяти)
-        effective_prompt = self._system_prompt or ""
-        if self._memory_manager:
-            ctx = self._memory_manager.get_context_for_llm()
-            if ctx["long_term_text"]:
-                effective_prompt += "\n\n" + ctx["long_term_text"]
-            if ctx["working_text"]:
-                effective_prompt += "\n\n" + ctx["working_text"]
+        # 2. Строим запрос через стратегию (с учётом памяти и профиля)
+        if self._profile_manager:
+            ctx = self._memory_manager.get_context_for_llm() if self._memory_manager else {}
+            effective_prompt = self._profile_manager.build_system_prompt(
+                base_prompt=self._system_prompt or "",
+                long_term_text=ctx.get("long_term_text", ""),
+                working_text=ctx.get("working_text", ""),
+            )
+        else:
+            effective_prompt = self._system_prompt or ""
+            if self._memory_manager:
+                ctx = self._memory_manager.get_context_for_llm()
+                if ctx["long_term_text"]:
+                    effective_prompt += "\n\n" + ctx["long_term_text"]
+                if ctx["working_text"]:
+                    effective_prompt += "\n\n" + ctx["working_text"]
         messages = self._strategy.build_messages(effective_prompt or None)
 
         # 3. Подсчёт токенов
@@ -241,6 +257,9 @@ class StrategyAgent:
             "total_tokens_used": self._total_tokens_used,
         }
         stats.update(self._strategy.get_stats())
+        if self._profile_manager:
+            active = self._profile_manager.get_active()
+            stats["active_profile"] = active.name if active else "(нет)"
         if self._memory_manager:
             stats["memory"] = self._memory_manager.stats()
         return stats
