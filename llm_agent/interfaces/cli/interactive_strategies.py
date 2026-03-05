@@ -57,6 +57,7 @@ from llm_agent.application.context_strategies import (
     StickyFactsStrategy,
 )
 from llm_agent.application.strategy_agent import StrategyAgent
+from llm_agent.core.invariant_loader import InvariantLoader
 from llm_agent.infrastructure.llm_factory import (
     DEFAULT_MODELS,
     PROVIDER_LABELS,
@@ -183,6 +184,11 @@ BRANCHING (стратегия 3):
   /task history               — завершённые фазы и артефакты
   /task list                  — список всех задач
   /task load <id>             — загрузить задачу по id
+
+ИНВАРИАНТЫ (Invariants):
+  /invariants              — показать все текущие инварианты
+  /invariants reload       — перечитать файлы из config/invariants/
+  /invariants check <текст> — проверить текст на соответствие инвариантам
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -653,6 +659,7 @@ def handle_command(
     memory_manager: MemoryManager | None = None,
     profile_manager: ProfileManager | None = None,
     task_orchestrator: TaskOrchestrator | None = None,
+    invariant_loader: InvariantLoader | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     try:
@@ -984,6 +991,59 @@ def handle_command(
             print(f"Ошибка: {e}")
         return current_strategy_num, True
 
+    # ---- Инварианты ----
+    if command == "/invariants":
+        if invariant_loader is None:
+            print("Загрузчик инвариантов не подключён.")
+            return current_strategy_num, True
+
+        sub = parts[1].lower() if len(parts) > 1 else None
+
+        if sub is None:
+            print(invariant_loader.format_for_display())
+            return current_strategy_num, True
+
+        if sub == "reload":
+            cats = invariant_loader.reload()
+            total_req = sum(len(c.required) for c in cats)
+            total_rec = sum(len(c.recommended) for c in cats)
+            print(
+                f"Инварианты перезагружены: {len(cats)} категорий, "
+                f"{total_req} обязательных, {total_rec} рекомендуемых."
+            )
+            return current_strategy_num, True
+
+        if sub == "check":
+            if len(parts) < 3:
+                print("Использование: /invariants check <текст>")
+                return current_strategy_num, True
+            text_to_check = " ".join(parts[2:])
+            inv_block = invariant_loader.build_prompt_block()
+            check_prompt = (
+                f"Проверь следующий текст или запрос на соответствие инвариантам проекта.\n\n"
+                f"{inv_block}\n\n"
+                f"Текст для проверки:\n{text_to_check}\n\n"
+                f"Если есть нарушения обязательных инвариантов, укажи конкретный инвариант "
+                f"и объясни конфликт. Используй формат:\n"
+                f"⛔ Конфликт с инвариантом: [категория] → [правило]\n"
+                f"Причина ограничения: [объяснение]\n"
+                f"Альтернативное решение: [предложение]\n\n"
+                f"Если нарушений нет, напиши: '✅ Запрос не нарушает инварианты.'"
+            )
+            try:
+                from llm_agent.domain.models import ChatMessage
+                messages = [ChatMessage(role="user", content=check_prompt)]
+                with spinner("Проверяю"):
+                    response = agent._llm_client.generate(messages)
+                print(f"\n{response.text.strip()}\n")
+            except Exception as exc:
+                print(f"Ошибка при проверке: {exc}")
+            return current_strategy_num, True
+
+        print(f"Неизвестная подкоманда: '{sub}'")
+        print("Доступные: /invariants, /invariants reload, /invariants check <текст>")
+        return current_strategy_num, True
+
     # ---- Задачи (Task Orchestrator) ----
     if command == "/task":
         if task_orchestrator is None:
@@ -1031,6 +1091,12 @@ def run_interactive(provider: str, model: str | None) -> None:
     }
     current_strategy_num = 1
 
+    # Invariant Loader инициализируется до агента, чтобы передать при создании
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)
+    ))))
+    invariant_loader = InvariantLoader(os.path.join(_project_root, "config"))
+
     agent = StrategyAgent(
         llm_client=client,
         strategy=strategies[current_strategy_num],
@@ -1040,6 +1106,7 @@ def run_interactive(provider: str, model: str | None) -> None:
         model_name=model_name,
         memory_manager=memory_manager,
         profile_manager=profile_manager,
+        invariant_loader=invariant_loader,
     )
 
     # Task Orchestrator (тот же DB-файл)
@@ -1047,12 +1114,17 @@ def run_interactive(provider: str, model: str | None) -> None:
         db_path=memory_db, agent=agent, memory_manager=memory_manager,
     )
 
+    _inv_cats = invariant_loader.categories
+    _inv_req = sum(len(c.required) for c in _inv_cats)
+    _inv_rec = sum(len(c.recommended) for c in _inv_cats)
+
     print("=" * 62)
     print("  LLM-агент: стратегии контекста + выбор провайдера")
     print("=" * 62)
     print(f"\n  Провайдер : {provider}  ({PROVIDER_LABELS.get(provider, '')})")
     print(f"  Модель    : {model_name}")
     print(f"  Стратегия : [{current_strategy_num}] {STRATEGY_NAMES[current_strategy_num]}")
+    print(f"  Инварианты: {_inv_req} обязательных, {_inv_rec} рекомендуемых (/invariants)")
     print(f"\n  Введите /help для списка команд.\n")
 
     while True:
@@ -1092,6 +1164,7 @@ def run_interactive(provider: str, model: str | None) -> None:
                 memory_manager=memory_manager,
                 profile_manager=profile_manager,
                 task_orchestrator=task_orchestrator,
+                invariant_loader=invariant_loader,
             )
             if handled:
                 continue

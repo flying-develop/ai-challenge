@@ -20,6 +20,7 @@ from llm_agent.domain.models import ChatMessage, TokenUsage
 from llm_agent.domain.protocols import LLMClientProtocol, TokenCounterProtocol
 
 if TYPE_CHECKING:
+    from llm_agent.core.invariant_loader import InvariantLoader
     from llm_agent.memory.manager import MemoryManager
     from llm_agent.memory.profile_manager import ProfileManager
 
@@ -44,6 +45,7 @@ class StrategyAgent:
         model_name: str = "",
         memory_manager: MemoryManager | None = None,
         profile_manager: ProfileManager | None = None,
+        invariant_loader: InvariantLoader | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._strategy = strategy
@@ -53,6 +55,7 @@ class StrategyAgent:
         self._model_name = model_name
         self._memory_manager = memory_manager
         self._profile_manager = profile_manager
+        self._invariant_loader = invariant_loader
         self._last_token_usage: TokenUsage | None = None
         self._turn: int = 0
         self._total_tokens_used: int = 0
@@ -105,6 +108,11 @@ class StrategyAgent:
     def profile_manager(self) -> ProfileManager | None:
         """Менеджер профилей (если подключён)."""
         return self._profile_manager
+
+    @property
+    def invariant_loader(self) -> InvariantLoader | None:
+        """Загрузчик инвариантов (если подключён)."""
+        return self._invariant_loader
 
     # ------------------------------------------------------------------
     # Управление стратегией и провайдером
@@ -198,6 +206,13 @@ class StrategyAgent:
                     effective_prompt += "\n\n" + ctx["long_term_text"]
                 if ctx["working_text"]:
                     effective_prompt += "\n\n" + ctx["working_text"]
+
+        # Инварианты встраиваются в начало system prompt (наивысший приоритет)
+        if self._invariant_loader:
+            inv_block = self._invariant_loader.build_prompt_block()
+            if inv_block:
+                effective_prompt = inv_block + ("\n\n" + effective_prompt if effective_prompt else "")
+
         messages = self._strategy.build_messages(effective_prompt or None)
 
         # 3. Подсчёт токенов
