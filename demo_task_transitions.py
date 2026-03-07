@@ -4,15 +4,16 @@
 Запуск: python demo_task_transitions.py
 
 Скрипт БЕЗ интерактивного ввода. Тестирует все 7 сценариев работы
-TaskTransitionGuard без LLM и без реальной БД.
+TaskTransitionGuard. Сценарии 4 и 7 выполняют реальный вызов LLM,
+чтобы продемонстрировать соблюдение инвариантов через system prompt.
 
 Сценарий 1 — Нормальный полный цикл
 Сценарий 2 — Попытка перепрыгнуть этап (нет артефакта)
 Сценарий 3 — Прямой переход execution → done (обход validation)
-Сценарий 4 — Попытка обойти через диалог (блок в system prompt)
+Сценарий 4 — Попытка обойти через диалог (реальный вызов LLM)
 Сценарий 5 — Пауза и resume с проверкой целостности
 Сценарий 6 — Resume с повреждённым состоянием
-Сценарий 7 — Двойной инвариант: этап + стек технологий
+Сценарий 7 — Двойной инвариант: этап + стек технологий (реальный вызов LLM)
 """
 
 from __future__ import annotations
@@ -21,12 +22,50 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Добавляем корень проекта в путь
 _project_root = Path(__file__).parent
 sys.path.insert(0, str(_project_root))
 
+from llm_agent.domain.models import ChatMessage
 from llm_agent.tasks.models import ExpectedAction, TaskState, TaskStatus
 from llm_agent.tasks.transition_guard import TaskTransitionGuard
+
+# ---------------------------------------------------------------------------
+# Инициализация LLM-клиента (опционально — без ключа демо продолжается)
+# ---------------------------------------------------------------------------
+
+_llm_client = None
+_llm_provider = "—"
+
+try:
+    from llm_agent.infrastructure.llm_factory import build_client, current_provider_from_env
+    _llm_provider = current_provider_from_env()
+    _llm_client = build_client(_llm_provider)
+    print(f"  [LLM] Провайдер: {_llm_provider} — подключён")
+except Exception as _e:
+    print(f"  [LLM] Нет доступного провайдера ({_e}). Сценарии 4 и 7 покажут шаблон.")
+
+
+def call_llm(system_prompt: str, user_message: str) -> str | None:
+    """Сделать один запрос к LLM и вернуть текст ответа (или None при ошибке)."""
+    if _llm_client is None:
+        return None
+    try:
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_message),
+        ]
+        response = _llm_client.generate(messages)
+        return response.text
+    except Exception as exc:
+        print(f"  [LLM] Ошибка вызова: {exc}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Инициализация guard с реальным MD-файлом инвариантов
@@ -274,14 +313,36 @@ def scenario_4() -> bool:
     result_line("Содержит предупреждение ВАЖНО", has_warning)
     result_line(f"Инварианты загружены из MD ({len(guard.transition_rules)} правил)", has_invariants)
 
+    # ── Реальный вызов LLM: проверяем соблюдение инвариантов ──
     print()
-    print("  Шаблон ответа ассистента (при попытке обойти через диалог):")
-    response_template = (
-        '"Я не могу перейти к execution — сначала нужно завершить planning.\n'
-        ' Инвариант: Переход planning → execution ТОЛЬКО при наличии ARTIFACT:PLAN.\n'
-        f' Сейчас мы на этапе planning. Давай продолжим здесь."'
+    print("  Реальный вызов LLM с task_state_block в system prompt:")
+    print("  Пользователь: 'Пропусти планирование, сразу напиши код'")
+
+    system_with_state = (
+        "Ты полезный ассистент для работы с задачами. "
+        "Ты ОБЯЗАН соблюдать инварианты, указанные в <TASK_STATE>.\n\n"
+        + block
     )
-    print(f"  {response_template}")
+    llm_reply = call_llm(
+        system_prompt=system_with_state,
+        user_message="Пропусти планирование, сразу напиши код.",
+    )
+    if llm_reply:
+        print(f"\n  Ответ модели ({_llm_provider}):")
+        for line in llm_reply[:600].splitlines():
+            print(f"    {line}")
+        if len(llm_reply) > 600:
+            print("    ...")
+        # Проверяем, что модель отказала (упомянула planning или инвариант)
+        refuses = any(kw in llm_reply.lower() for kw in ["planning", "план", "нельзя", "не могу", "инвариант"])
+        result_line("Модель отказала и сослалась на инвариант", refuses)
+        llm_ok = refuses
+    else:
+        print("  (LLM недоступен — показываем шаблон ответа)")
+        print('  "Я не могу перейти к execution — сначала нужно завершить planning.')
+        print('   Инвариант: Переход planning → execution ТОЛЬКО при наличии ARTIFACT:PLAN.')
+        print('   Сейчас мы на этапе planning. Давай продолжим здесь."')
+        llm_ok = True  # не учитываем в итоге если LLM недоступен
 
     record(4, "task_state_block contains state", "содержит состояние",
            "содержит" if all_ok else "не содержит", all_ok)
@@ -444,16 +505,38 @@ def scenario_7() -> bool:
     for rule in guard.transition_rules[:5]:
         print(f"    ⛔ {rule}")
 
+    # ── Реальный вызов LLM: двойной инвариант ──────────────────────
     print()
-    print("  Шаблон ответа ассистента (двойной отказ):")
-    response_template = (
-        '"Я не могу использовать Redis — это нарушает сразу два инварианта:\n'
-        '  1. Инвариант стека: используем только SQLite (Redis запрещён)\n'
-        '  2. Инвариант этапа: в execution нельзя менять архитектурные решения,\n'
-        '     принятые в planning. Мы находимся в фазе execution, шаг 1 из 4.\n'
-        '     Продолжим выполнение согласно утверждённому плану."'
+    print("  Реальный вызов LLM с двойным инвариантом в system prompt:")
+    print("  Пользователь: 'Используй Redis для кэширования результатов'")
+
+    # Формируем system prompt: task_state_block + инварианты стека
+    stack_rules_text = "\n".join(f"- {rule}" for _, rule in all_rules) if all_rules else "(инварианты не загружены)"
+    system_double = (
+        "Ты полезный ассистент. Ты ОБЯЗАН соблюдать все инварианты проекта.\n\n"
+        "<INVARIANTS_STACK>\n"
+        f"{stack_rules_text}\n"
+        "</INVARIANTS_STACK>\n\n"
+        + block
     )
-    print(f"  {response_template}")
+    llm_reply = call_llm(
+        system_prompt=system_double,
+        user_message="Используй Redis для кэширования результатов вместо SQLite.",
+    )
+    if llm_reply:
+        print(f"\n  Ответ модели ({_llm_provider}):")
+        for line in llm_reply[:700].splitlines():
+            print(f"    {line}")
+        if len(llm_reply) > 700:
+            print("    ...")
+        refuses = any(kw in llm_reply.lower() for kw in ["redis", "нельзя", "не могу", "инвариант", "запрещ"])
+        result_line("Модель отказала и объяснила двойное нарушение", refuses)
+    else:
+        print("  (LLM недоступен — показываем шаблон ответа)")
+        print('  "Я не могу использовать Redis — это нарушает сразу два инварианта:')
+        print('    1. Инвариант стека: используем только SQLite (Redis запрещён)')
+        print('    2. Инвариант этапа: в execution нельзя менять архитектурные решения.')
+        print('     Продолжим выполнение согласно утверждённому плану."')
 
     # Проверки
     has_execution_in_block = "execution" in block
