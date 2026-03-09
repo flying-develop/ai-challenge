@@ -43,10 +43,10 @@ class MCPConfigParser:
 
     _VAR_RE = re.compile(r"\{([A-Z0-9_]+)\}")
 
-    def __init__(self, config_path: Path | None = None):
+    def __init__(self, config_path: Path | str | None = None):
         if config_path is None:
             config_path = Path(__file__).parent.parent / "config" / "mcp-servers.md"
-        self.config_path = config_path
+        self.config_path = Path(config_path)
 
     def load(self) -> list[MCPServerConfig]:
         """Загрузить и распарсить конфигурацию."""
