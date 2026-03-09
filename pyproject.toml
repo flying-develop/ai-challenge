@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "tiktoken>=0.7",
     "openai>=1.0",
+    "mcp>=1.8",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,7 @@ chat = "llm_agent.interfaces.cli.interactive_strategies:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["llm_agent*"]
+include = ["llm_agent*", "mcp_client*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
