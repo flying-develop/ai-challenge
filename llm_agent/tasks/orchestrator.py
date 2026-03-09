@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from llm_agent.tasks.models import ExpectedAction, TaskState, TaskStatus
 from llm_agent.tasks.state_machine import TaskStateMachine
+from llm_agent.tasks.transition_guard import TaskTransitionGuard
 from llm_agent.tasks import prompts as task_prompts
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ class TaskOrchestrator:
         db_path: str | Path,
         agent: "StrategyAgent",
         memory_manager: "MemoryManager | None" = None,
+        config_dir: str | Path | None = None,
     ) -> None:
         self._db_path = Path(db_path)
         self._agent = agent
@@ -43,6 +45,8 @@ class TaskOrchestrator:
 
         self._active_task: TaskState | None = None
         self._original_system_prompt: str | None = None
+
+        self._guard = TaskTransitionGuard(config_dir)
 
     # ------------------------------------------------------------------
     # Схема
@@ -253,12 +257,15 @@ class TaskOrchestrator:
         if task is None:
             raise ValueError("Нет активной задачи.")
 
-        # Валидируем артефакт текущей фазы
-        TaskStateMachine.validate_artifact_for_next(task.status, task.artifact)
-
         # Определяем следующую фазу
         next_status = TaskStateMachine.get_next_phase(task.status)
-        TaskStateMachine.validate_transition(task.status, next_status)
+
+        # Строгая проверка через TaskTransitionGuard (программный уровень 1)
+        result = self._guard.validate_transition(task, next_status.value)
+        if not result.allowed:
+            raise ValueError(
+                self._guard.format_error(task.status.value, next_status.value, result)
+            )
 
         # Сохраняем текущий артефакт в историю
         task.history.append({
@@ -327,6 +334,11 @@ class TaskOrchestrator:
                 f"Задача не на паузе (статус: {task.status.value}). "
                 "Команда resume работает только для паузных задач."
             )
+
+        # Строгая проверка целостности через TaskTransitionGuard (программный уровень 1)
+        resume_result = self._guard.validate_resume(task)
+        if not resume_result.allowed:
+            raise ValueError(self._guard.format_resume_error(resume_result))
 
         original_phase = task.paused_at
         if original_phase is None:
@@ -488,18 +500,24 @@ class TaskOrchestrator:
     def _build_phase_prompt(self, task: TaskState) -> str:
         """Построить system prompt для текущей фазы задачи."""
         if task.status == TaskStatus.PLANNING:
-            return task_prompts.planning_prompt(task.title)
+            base = task_prompts.planning_prompt(task.title)
         elif task.status == TaskStatus.EXECUTION:
-            return task_prompts.execution_prompt(
+            base = task_prompts.execution_prompt(
                 task.title, task.plan_artifact, task.current_step,
             )
         elif task.status == TaskStatus.VALIDATION:
-            return task_prompts.validation_prompt(
+            base = task_prompts.validation_prompt(
                 task.title, task.plan_artifact, task.result_artifact,
             )
         elif task.status == TaskStatus.DONE:
             return task_prompts.done_prompt(task.title)
-        return ""
+        else:
+            return ""
+
+        # Добавляем блок состояния для информирования LLM о текущем этапе и инвариантах
+        total_steps = len(task.plan_steps)
+        state_block = self._guard.build_task_state_block(task, total_steps)
+        return base + "\n\n" + state_block
 
     # ------------------------------------------------------------------
     # Ресурсы

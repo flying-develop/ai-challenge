@@ -1111,7 +1111,10 @@ def run_interactive(provider: str, model: str | None) -> None:
 
     # Task Orchestrator (тот же DB-файл)
     task_orchestrator = TaskOrchestrator(
-        db_path=memory_db, agent=agent, memory_manager=memory_manager,
+        db_path=memory_db,
+        agent=agent,
+        memory_manager=memory_manager,
+        config_dir=os.path.join(_project_root, "config"),
     )
 
     _inv_cats = invariant_loader.categories
