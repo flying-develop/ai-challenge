@@ -71,6 +71,13 @@ from llm_agent.memory.manager import MemoryManager
 from llm_agent.memory.profile_manager import ProfileManager
 from llm_agent.tasks.orchestrator import TaskOrchestrator
 
+try:
+    from mcp_client.config import MCPConfigParser
+    from mcp_client.client import MCPClient
+    _MCP_AVAILABLE = True
+except ImportError:
+    _MCP_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Спиннер
@@ -189,6 +196,12 @@ BRANCHING (стратегия 3):
   /invariants              — показать все текущие инварианты
   /invariants reload       — перечитать файлы из config/invariants/
   /invariants check <текст> — проверить текст на соответствие инвариантам
+
+MCP (Model Context Protocol):
+  /mcp servers             — список сконфигурированных серверов (config/mcp-servers.md)
+  /mcp tools <name>        — подключиться к серверу и вывести список инструментов
+  /mcp tools               — инструменты последнего подключённого сервера (кэш)
+  /mcp status              — статус: какой сервер, сколько инструментов
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -637,6 +650,103 @@ def _handle_task_command(parts: list[str], orchestrator: TaskOrchestrator) -> No
 
 
 # ---------------------------------------------------------------------------
+# Обработка MCP-команд
+# ---------------------------------------------------------------------------
+
+def _handle_mcp_command(parts: list[str], mcp_state: dict) -> None:
+    """Обработать /mcp <подкоманда> ...
+
+    mcp_state — мутируемый словарь с ключами:
+        config_parser: MCPConfigParser | None
+        last_client: MCPClient | None
+    """
+    if not _MCP_AVAILABLE:
+        print("❌ MCP: пакет mcp не установлен.")
+        print("   Установите: pip install mcp")
+        return
+
+    config_parser: MCPConfigParser = mcp_state.get("config_parser")
+    last_client: MCPClient | None = mcp_state.get("last_client")
+
+    sub = parts[1].lower() if len(parts) > 1 else "status"
+
+    # /mcp servers
+    if sub == "servers":
+        if config_parser is None:
+            print("❌ MCP: конфигурация не загружена.")
+            return
+        try:
+            servers = config_parser.load()
+        except EnvironmentError as exc:
+            print(exc)
+            return
+        if not servers:
+            print("  Серверы не найдены в config/mcp-servers.md")
+            return
+        print(f"\n  MCP-серверы ({len(servers)} шт.):")
+        for s in servers:
+            print(f"    [{s.name}] transport={s.transport}")
+            if s.description:
+                print(f"      {s.description}")
+        print()
+        return
+
+    # /mcp tools [name]
+    if sub == "tools":
+        server_name = parts[2] if len(parts) > 2 else None
+
+        if server_name is None:
+            # Показать инструменты из кэша
+            if last_client is None or not last_client.tools:
+                print("  Кэш пуст. Используйте: /mcp tools <name>")
+                return
+            print(last_client.get_tools_summary())
+            return
+
+        # Подключиться и получить инструменты
+        if config_parser is None:
+            print("❌ MCP: конфигурация не загружена.")
+            return
+        try:
+            servers = config_parser.load()
+        except EnvironmentError as exc:
+            print(exc)
+            return
+
+        found = next((s for s in servers if s.name == server_name), None)
+        if found is None:
+            available = ", ".join(s.name for s in servers) or "(нет)"
+            print(f"❌ MCP: сервер '{server_name}' не найден.")
+            print(f"   Доступные серверы: {available}")
+            return
+
+        client = MCPClient(found)
+        print(f"  Подключаюсь к '{found.name}'...")
+        try:
+            client.connect_and_list_tools()
+        except RuntimeError as exc:
+            print(exc)
+            return
+
+        mcp_state["last_client"] = client
+        print(client.get_tools_summary())
+        return
+
+    # /mcp status
+    if sub == "status":
+        if last_client is None:
+            print("  MCP: нет активного подключения.")
+            print("  Используйте: /mcp tools <name>")
+        else:
+            count = len(last_client.tools)
+            print(f"  MCP: последний сервер — '{last_client.config.name}', {count} инструментов.")
+        return
+
+    print(f"Неизвестная подкоманда MCP: '{sub}'")
+    print("Доступные: /mcp servers | /mcp tools [name] | /mcp status")
+
+
+# ---------------------------------------------------------------------------
 # Обработка команд
 # ---------------------------------------------------------------------------
 
@@ -660,6 +770,7 @@ def handle_command(
     profile_manager: ProfileManager | None = None,
     task_orchestrator: TaskOrchestrator | None = None,
     invariant_loader: InvariantLoader | None = None,
+    mcp_state: dict | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     try:
@@ -1052,6 +1163,14 @@ def handle_command(
         _handle_task_command(parts, task_orchestrator)
         return current_strategy_num, True
 
+    # ---- MCP ----
+    if command == "/mcp":
+        if mcp_state is None:
+            print("MCP не настроен.")
+        else:
+            _handle_mcp_command(parts, mcp_state)
+        return current_strategy_num, True
+
     # ---- Общие ----
     if command == "/clear":
         agent.clear_history()
@@ -1117,6 +1236,13 @@ def run_interactive(provider: str, model: str | None) -> None:
         config_dir=os.path.join(_project_root, "config"),
     )
 
+    # MCP-состояние: config_parser + последний клиент (кэш)
+    mcp_state: dict = {"config_parser": None, "last_client": None}
+    if _MCP_AVAILABLE:
+        mcp_state["config_parser"] = MCPConfigParser(
+            config_path=os.path.join(_project_root, "config", "mcp-servers.md")
+        )
+
     _inv_cats = invariant_loader.categories
     _inv_req = sum(len(c.required) for c in _inv_cats)
     _inv_rec = sum(len(c.recommended) for c in _inv_cats)
@@ -1168,6 +1294,7 @@ def run_interactive(provider: str, model: str | None) -> None:
                 profile_manager=profile_manager,
                 task_orchestrator=task_orchestrator,
                 invariant_loader=invariant_loader,
+                mcp_state=mcp_state,
             )
             if handled:
                 continue
