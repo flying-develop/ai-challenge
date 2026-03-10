@@ -80,7 +80,10 @@ class MCPConfigParser:
             transport = fields.get("transport", "stdio")
             command = self._substitute_env(fields.get("command"))
             args_raw = self._substitute_env(fields.get("args"))
-            args = [args_raw] if args_raw else None
+            # Разбиваем аргументы по пробелам, чтобы поддерживать
+            # как одиночные пути ("/path/to/server.js"), так и флаги
+            # с именем модуля ("-m mcp_server.cbr_server").
+            args = args_raw.split() if args_raw else None
             description = fields.get("описание", fields.get("description", ""))
 
             servers.append(MCPServerConfig(

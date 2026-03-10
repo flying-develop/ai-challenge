@@ -9,3 +9,10 @@
 - args: {MARKDOWNIFY_MCP_PATH}/dist/index.js
 - описание: Конвертация файлов и веб-контента в Markdown (PDF, DOCX, YouTube, веб-страницы)
 - требует: node >= 18, pnpm
+
+## cbr_currencies
+- transport: stdio
+- command: python
+- args: -m mcp_server.cbr_server
+- описание: Курсы валют ЦБ РФ (собственный MCP-сервер)
+- требует: доступ к интернету (cbr.ru)

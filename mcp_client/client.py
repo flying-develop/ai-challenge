@@ -51,6 +51,63 @@ class MCPClient:
         self.config = config
         self._tools: list[dict] = []
 
+    def call_tool(self, tool_name: str, arguments: dict) -> str:
+        """
+        Вызывает инструмент MCP-сервера и возвращает результат.
+
+        Args:
+            tool_name: Имя инструмента (например, "get_exchange_rates")
+            arguments: Аргументы инструмента в виде словаря
+
+        Returns:
+            Текстовый результат от инструмента
+
+        Raises:
+            RuntimeError: при ошибке подключения или выполнения
+        """
+        if not _MCP_SDK_AVAILABLE:
+            raise RuntimeError(
+                "❌ MCP: пакет mcp не установлен.\n"
+                "   Установите: pip install mcp"
+            )
+
+        async def _call() -> str:
+            if self.config.transport == "stdio":
+                server_params = StdioServerParameters(
+                    command=self.config.command,
+                    args=self.config.args or [],
+                    env=self.config.env,
+                )
+                try:
+                    async with stdio_client(server_params) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            try:
+                                await asyncio.wait_for(
+                                    session.initialize(), timeout=_INIT_TIMEOUT
+                                )
+                            except asyncio.TimeoutError:
+                                raise RuntimeError(
+                                    f"❌ MCP: Таймаут инициализации \"{self.config.name}\" ({_INIT_TIMEOUT}с)"
+                                )
+                            result = await session.call_tool(tool_name, arguments)
+                            return "\n".join(
+                                block.text
+                                for block in result.content
+                                if hasattr(block, "text")
+                            )
+                except RuntimeError:
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"❌ MCP: Ошибка вызова инструмента \"{tool_name}\": {exc}"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"Транспорт '{self.config.transport}' не реализован"
+                )
+
+        return asyncio.run(_call())
+
     def connect_and_list_tools(self) -> list[dict]:
         """
         Запускает MCP-сервер, получает список tools, останавливает.
