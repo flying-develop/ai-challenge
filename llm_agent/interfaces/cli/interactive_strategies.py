@@ -201,7 +201,15 @@ MCP (Model Context Protocol):
   /mcp servers             — список сконфигурированных серверов (config/mcp-servers.md)
   /mcp tools <name>        — подключиться к серверу и вывести список инструментов
   /mcp tools               — инструменты последнего подключённого сервера (кэш)
+  /mcp call <server> <tool> [key=value ...]  — вызвать инструмент MCP-сервера
   /mcp status              — статус: какой сервер, сколько инструментов
+
+КУРСЫ ВАЛЮТ (ЦБ РФ):
+  /convert 100 USD         — конвертировать 100 долларов в рубли
+  /convert 500 EUR         — конвертировать 500 евро в рубли
+  /convert 10000 RUB USD   — конвертировать 10000 рублей в доллары
+  /convert 50000 RUB CNY   — конвертировать 50000 рублей в юани
+  (Требует: сервер cbr_currencies в config/mcp-servers.md)
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -653,6 +661,73 @@ def _handle_task_command(parts: list[str], orchestrator: TaskOrchestrator) -> No
 # Обработка MCP-команд
 # ---------------------------------------------------------------------------
 
+def _handle_convert_command(args: list[str], mcp_state: dict) -> None:
+    """Обработать /convert <сумма> <валюта> | /convert <сумма> RUB <валюта>.
+
+    Примеры:
+        /convert 100 USD           — 100 долларов в рубли
+        /convert 10000 RUB USD     — 10000 рублей в доллары
+        /convert 500 EUR           — 500 евро в рубли
+    """
+    if not _MCP_AVAILABLE:
+        print("❌ MCP: пакет mcp не установлен.")
+        print("   Установите: pip install mcp")
+        return
+
+    config_parser: MCPConfigParser = mcp_state.get("config_parser")
+
+    if len(args) == 2:
+        try:
+            amount = float(args[0].replace(",", "."))
+        except ValueError:
+            print(f"Ошибка: '{args[0]}' — не число. Укажите сумму цифрами.")
+            return
+        currency = args[1].upper()
+        direction = "to_rub"
+
+    elif len(args) == 3 and args[1].upper() == "RUB":
+        try:
+            amount = float(args[0].replace(",", "."))
+        except ValueError:
+            print(f"Ошибка: '{args[0]}' — не число. Укажите сумму цифрами.")
+            return
+        currency = args[2].upper()
+        direction = "from_rub"
+
+    else:
+        print("Использование:")
+        print("  /convert 100 USD        — доллары в рубли")
+        print("  /convert 10000 RUB USD  — рубли в доллары")
+        return
+
+    if config_parser is None:
+        print("❌ MCP: конфигурация не загружена.")
+        return
+
+    try:
+        servers = config_parser.load()
+    except EnvironmentError as exc:
+        print(exc)
+        return
+
+    found = next((s for s in servers if s.name == "cbr_currencies"), None)
+    if found is None:
+        print("MCP-сервер 'cbr_currencies' не сконфигурирован.")
+        print("Добавьте в config/mcp-servers.md секцию ## cbr_currencies")
+        return
+
+    client = MCPClient(found)
+    try:
+        result = client.call_tool("convert_currency", {
+            "amount": amount,
+            "currency_code": currency,
+            "direction": direction,
+        })
+        print(f"💱 {result}")
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc))
+
+
 def _handle_mcp_command(parts: list[str], mcp_state: dict) -> None:
     """Обработать /mcp <подкоманда> ...
 
@@ -742,8 +817,61 @@ def _handle_mcp_command(parts: list[str], mcp_state: dict) -> None:
             print(f"  MCP: последний сервер — '{last_client.config.name}', {count} инструментов.")
         return
 
+    # /mcp call <server> <tool> [key=value ...]
+    if sub == "call":
+        if len(parts) < 4:
+            print("Использование: /mcp call <server> <tool> [key=value ...]")
+            print("Пример: /mcp call cbr_currencies get_exchange_rates")
+            print("Пример: /mcp call cbr_currencies get_currency_rate currency_code=USD")
+            return
+
+        server_name = parts[2]
+        tool_name = parts[3]
+        raw_kwargs = parts[4:]
+
+        # Парсинг key=value аргументов с автоматическим приведением типов
+        arguments: dict = {}
+        for kv in raw_kwargs:
+            if "=" not in kv:
+                print(f"Ошибка: аргумент '{kv}' должен быть в формате key=value")
+                return
+            key, _, value = kv.partition("=")
+            try:
+                arguments[key] = int(value)
+            except ValueError:
+                try:
+                    arguments[key] = float(value)
+                except ValueError:
+                    arguments[key] = value
+
+        if config_parser is None:
+            print("❌ MCP: конфигурация не загружена.")
+            return
+        try:
+            servers = config_parser.load()
+        except EnvironmentError as exc:
+            print(exc)
+            return
+
+        found = next((s for s in servers if s.name == server_name), None)
+        if found is None:
+            available = ", ".join(s.name for s in servers) or "(нет)"
+            print(f"❌ MCP: сервер '{server_name}' не найден.")
+            print(f"   Доступные серверы: {available}")
+            return
+
+        client = MCPClient(found)
+        args_str = ", ".join(f"{k}={v}" for k, v in arguments.items())
+        print(f"📡 Вызов: {tool_name}({args_str})")
+        try:
+            result = client.call_tool(tool_name, arguments)
+            print(result)
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc))
+        return
+
     print(f"Неизвестная подкоманда MCP: '{sub}'")
-    print("Доступные: /mcp servers | /mcp tools [name] | /mcp status")
+    print("Доступные: /mcp servers | /mcp tools [name] | /mcp call <server> <tool> [key=value ...] | /mcp status")
 
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1297,14 @@ def handle_command(
             print("MCP не настроен.")
         else:
             _handle_mcp_command(parts, mcp_state)
+        return current_strategy_num, True
+
+    # ---- Конвертация валют ----
+    if command == "/convert":
+        if mcp_state is None:
+            print("MCP не настроен.")
+            return current_strategy_num, True
+        _handle_convert_command(parts[1:], mcp_state)
         return current_strategy_num, True
 
     # ---- Общие ----
