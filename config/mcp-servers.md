@@ -16,3 +16,10 @@
 - args: -m mcp_server.cbr_server
 - описание: Курсы валют ЦБ РФ (собственный MCP-сервер)
 - требует: доступ к интернету (cbr.ru)
+
+## news_digest
+- transport: stdio
+- command: python
+- args: -m mcp_server.news_server
+- описание: Сбор новостей РИА + дневные сводки (фоновый планировщик)
+- требует: доступ к интернету (ria.ru), LLM-провайдер в .env
