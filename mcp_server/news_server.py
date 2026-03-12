@@ -1,324 +1,408 @@
-"""MCP-сервер "News Digest": сбор новостей и генерация дневных сводок.
+"""MCP-пайплайн новостей: получение → суммаризация → доставка.
 
 Образовательные концепции:
-1. Фоновые задачи в MCP-сервере (threading + schedule)
-2. Персистентное хранение (SQLite) внутри MCP-сервера
-3. Интеграция MCP-сервера с LLM (сервер сам вызывает LLM)
-4. Агрегация и суммаризация данных по расписанию
+1. MCP-инструменты как этапы пайплайна (chain of tools)
+2. Передача данных между инструментами через JSON-строки
+3. Самодостаточный инструмент (summarize_news сам вызывает LLM)
+4. Оркестратор пайплайна (run_news_pipeline вызывает три инструмента цепочкой)
+5. Рабочие часы (09:00-17:00 МСК) для автоматического запуска
 
-Архитектура:
-  - FastMCP: регистрирует инструменты, обрабатывает stdio транспорт
-  - NewsStorage: SQLite БД (headlines, daily_digests, scheduler_log)
-  - NewsScheduler: фоновый поток — каждый час RSS, каждый день сводка
-  - llm_fn: вызов LLM для генерации сводок (читает провайдер из .env)
+Архитектура пайплайна:
+  fetch_news → summarize_news → deliver_news
+       ↓             ↓               ↓
+   JSON (статьи)  JSON (сводки)   Отчёт (SQLite + Telegram)
+
+Все три инструмента доступны для ручного вызова по отдельности.
+run_news_pipeline выполняет цепочку автоматически.
 
 Запуск:
     python -m mcp_server.news_server
 
-Инструменты (6 штук):
-    get_latest_headlines   — последние N заголовков
-    get_headlines_by_date  — заголовки за дату
-    get_daily_digest       — сводка дня (от LLM)
-    get_scheduler_status   — статус планировщика
-    force_fetch_now        — принудительный сбор
-    force_digest_now       — принудительная генерация сводки
+Инструменты:
+    fetch_news          — получить и сгруппировать новости из RSS
+    summarize_news      — суммаризировать категории через LLM
+    deliver_news        — сохранить в SQLite и отправить в Telegram
+    run_news_pipeline   — полный пайплайн одной командой
 """
 
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
+import json
+import os
+from datetime import datetime, timezone, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server.news_storage import NewsStorage
-from mcp_server.scheduler import NewsScheduler
+from mcp_server.news_api import (
+    fetch_rss_by_categories,
+    format_telegram_message,
+    get_db_path,
+    get_existing_links,
+    get_pipeline_status,
+    get_summaries,
+    init_db,
+    mark_links_processed,
+    mark_telegram_sent,
+    save_summaries,
+    send_telegram_message,
+)
+from mcp_server.llm_client import create_llm_fn
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
-# Глобальные объекты (инициализируются в if __name__ == "__main__")
-# ---------------------------------------------------------------------------
-# FastMCP регистрирует инструменты через декораторы на уровне модуля,
-# поэтому storage и scheduler объявлены как глобальные переменные.
-# При запуске через python -m они инициализируются в блоке __main__.
-
-mcp = FastMCP("News Digest Server")
-
-# Будут инициализированы при запуске
-_storage: NewsStorage | None = None
-_scheduler: NewsScheduler | None = None
-
-
-def _get_storage() -> NewsStorage:
-    """Вернуть глобальное хранилище. Инициализирует с путём по умолчанию если нужно."""
-    global _storage
-    if _storage is None:
-        # Fallback: создать хранилище в текущей директории
-        # (нужно только при импорте модуля без __main__)
-        _storage = NewsStorage("data/news.db")
-    return _storage
-
-
-def _get_scheduler() -> NewsScheduler | None:
-    """Вернуть глобальный планировщик."""
-    return _scheduler
-
-
-# ---------------------------------------------------------------------------
-# Инструмент 1: Последние заголовки
+# Инициализация
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def get_latest_headlines(limit: int = 20) -> str:
-    """
-    Получить последние заголовки новостей.
+mcp = FastMCP("News Pipeline Server")
 
-    Args:
-        limit: Количество заголовков (по умолчанию 20, максимум 100)
-
-    Returns:
-        Список последних заголовков с датами публикации
-    """
-    limit = max(1, min(limit, 100))
-    storage = _get_storage()
-    headlines = storage.get_headlines(limit=limit)
-
-    if not headlines:
-        return "Заголовки не найдены. Используйте force_fetch_now() для сбора."
-
-    lines = [f"Последние {len(headlines)} заголовков новостей:\n"]
-    for i, h in enumerate(headlines, 1):
-        # Форматируем дату: берём только время из ISO 8601
-        pub_date = h.get("pub_date", "")
-        time_str = ""
-        if pub_date and "T" in pub_date:
-            time_part = pub_date.split("T")[1]
-            # Берём HH:MM из "HH:MM:SS+03:00"
-            time_str = time_part[:5]
-        elif pub_date:
-            time_str = pub_date[:10]
-
-        title = h.get("title", "")
-        link = h.get("link", "")
-        if time_str:
-            lines.append(f"  {i}. [{time_str}] {title}")
-        else:
-            lines.append(f"  {i}. {title}")
-        if link:
-            lines.append(f"     {link}")
-
-    total = storage.count_headlines()
-    lines.append(f"\nВсего в базе: {total} заголовков")
-    return "\n".join(lines)
+# Московское время
+_MSK = timezone(timedelta(hours=3))
 
 
-# ---------------------------------------------------------------------------
-# Инструмент 2: Заголовки за дату
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def get_headlines_by_date(date_str: str) -> str:
-    """
-    Получить заголовки новостей за конкретную дату.
-
-    Args:
-        date_str: Дата в формате YYYY-MM-DD (например, 2026-03-11)
-
-    Returns:
-        Все собранные заголовки за указанную дату
-    """
-    # Валидация формата даты
+def _get_env_int(key: str, default: int) -> int:
+    """Прочитать целочисленную переменную окружения."""
     try:
-        from datetime import datetime
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return f"Неверный формат даты '{date_str}'. Используйте YYYY-MM-DD"
+        return int(os.environ.get(key, default))
+    except (ValueError, TypeError):
+        return default
 
-    storage = _get_storage()
-    headlines = storage.get_headlines(date=date_str, limit=500)
 
-    if not headlines:
-        return f"Заголовки за {date_str} не найдены."
-
-    lines = [f"Заголовки за {date_str} ({len(headlines)} шт.):\n"]
-    for i, h in enumerate(headlines, 1):
-        pub_date = h.get("pub_date", "")
-        time_str = ""
-        if pub_date and "T" in pub_date:
-            time_part = pub_date.split("T")[1]
-            time_str = time_part[:5]
-
-        title = h.get("title", "")
-        if time_str:
-            lines.append(f"  {i}. [{time_str}] {title}")
-        else:
-            lines.append(f"  {i}. {title}")
-
-    return "\n".join(lines)
+def _get_env_list(key: str, default: str = "") -> list[str]:
+    """Прочитать список через запятую из .env."""
+    raw = os.environ.get(key, default).strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 # ---------------------------------------------------------------------------
-# Инструмент 3: Дневная сводка
+# Инструмент 1: fetch_news
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_daily_digest(date_str: str = "") -> str:
+def fetch_news(
+    feed_url: str = "",
+    max_per_category: int = 0,
+    categories: str = "",
+) -> str:
     """
-    Получить сводку новостей за день (сгенерированную LLM).
+    Получить новости из RSS-фида и сгруппировать по категориям.
+
+    Шаг 1/3 пайплайна. Результат передаётся в summarize_news.
 
     Args:
-        date_str: Дата YYYY-MM-DD (по умолчанию — последняя доступная сводка)
+        feed_url: URL RSS-фида (по умолчанию из NEWS_RSS_FEEDS в .env).
+        max_per_category: Макс. статей на категорию (0 = из NEWS_MAX_ARTICLES_PER_CATEGORY).
+        categories: Категории через запятую (пустое = из NEWS_CATEGORIES в .env).
 
     Returns:
-        Текст дневной сводки или сообщение что сводка ещё не готова
+        JSON-строка:
+        {
+          "date": "2026-03-12",
+          "categories": {
+            "economics": [{"title": ..., "description": ..., "link": ..., "pubDate": ...}, ...],
+            ...
+          }
+        }
     """
-    storage = _get_storage()
+    # Читаем .env если параметры не заданы
+    if not feed_url:
+        feeds_raw = os.environ.get("NEWS_RSS_FEEDS", "https://lenta.ru/rss").strip()
+        # Берём первый URL если несколько
+        feed_url = feeds_raw.split(",")[0].strip()
 
-    if date_str:
-        # Валидация формата
-        try:
-            from datetime import datetime
-            datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            return f"Неверный формат даты '{date_str}'. Используйте YYYY-MM-DD"
-        digest = storage.get_digest(date_str)
-        if not digest:
-            return f"Сводка за {date_str} не найдена. Используйте force_digest_now() для генерации."
+    if max_per_category <= 0:
+        max_per_category = _get_env_int("NEWS_MAX_ARTICLES_PER_CATEGORY", 10)
+
+    if not categories:
+        cats_list = _get_env_list("NEWS_CATEGORIES", "russia,world,economics,science,sport,culture")
     else:
-        digest = storage.get_latest_digest()
-        if not digest:
-            return (
-                "Сводки ещё нет. Используйте force_digest_now() для генерации "
-                "или дождитесь 23:00 (автоматическая генерация)."
-            )
+        cats_list = [c.strip() for c in categories.split(",") if c.strip()]
 
-    date_label = digest.get("date", "")
-    count = digest.get("headline_count", 0)
-    text = digest.get("digest_text", "")
-    created_at = digest.get("created_at", "")
+    # Дедупликация: исключаем уже обработанные статьи
+    db_path = get_db_path()
+    existing_links = get_existing_links(db_path)
 
-    lines = [
-        f"Сводка дня за {date_label} (на основе {count} заголовков):",
-        f"Создана: {created_at[:19].replace('T', ' ')} UTC",
-        "",
-        text,
-    ]
-    return "\n".join(lines)
+    try:
+        grouped = fetch_rss_by_categories(
+            feed_url=feed_url,
+            max_per_category=max_per_category,
+            categories=cats_list,
+            existing_links=existing_links,
+        )
+    except (ConnectionError, ValueError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    today = datetime.now(_MSK).strftime("%Y-%m-%d")
+
+    result = {
+        "date": today,
+        "categories": grouped,
+    }
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
-# Инструмент 4: Статус планировщика
+# Инструмент 2: summarize_news
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_scheduler_status() -> str:
+def summarize_news(news_json: str) -> str:
     """
-    Показать статус планировщика: когда последний раз выполнялись задачи.
+    Суммаризировать новости по категориям через LLM.
+
+    Шаг 2/3 пайплайна. Получает JSON из fetch_news, возвращает JSON для deliver_news.
+
+    Образовательная концепция: MCP-инструмент вызывает LLM самостоятельно
+    через urllib + API-ключ из .env. Это делает инструмент самодостаточным.
+
+    Args:
+        news_json: JSON-строка из fetch_news.
 
     Returns:
-        Время последнего сбора RSS, время последней сводки,
-        общее количество заголовков в базе
+        JSON-строка:
+        {
+          "date": "2026-03-12",
+          "summaries": {"economics": "Краткое содержание...", "science": "...", ...},
+          "article_counts": {"economics": 10, "science": 7, ...}
+        }
     """
-    storage = _get_storage()
-    status = storage.get_scheduler_status()
+    # Парсим входной JSON
+    try:
+        data = json.loads(news_json)
+    except json.JSONDecodeError as exc:
+        return json.dumps({"error": f"Невалидный JSON: {exc}"}, ensure_ascii=False)
 
-    lines = ["Статус планировщика новостей:\n"]
+    if "error" in data:
+        return json.dumps({"error": data["error"]}, ensure_ascii=False)
 
-    # Последний сбор RSS
-    last_fetch = status.get("last_fetch")
-    if last_fetch:
-        ts = last_fetch.get("executed_at", "")[:19].replace("T", " ")
-        stat = "✅" if last_fetch.get("status") == "success" else "❌"
-        details = last_fetch.get("details", "")
-        lines.append(f"  Последний сбор RSS: {ts} UTC  {stat}")
-        if details:
-            lines.append(f"    Детали: {details}")
-    else:
-        lines.append("  Последний сбор RSS: ещё не выполнялся")
+    date_str = data.get("date", datetime.now(_MSK).strftime("%Y-%m-%d"))
+    categories_data: dict[str, list[dict]] = data.get("categories", {})
 
-    # Последняя сводка
-    last_digest = status.get("last_digest")
-    if last_digest:
-        ts = last_digest.get("executed_at", "")[:19].replace("T", " ")
-        stat = "✅" if last_digest.get("status") == "success" else "❌"
-        details = last_digest.get("details", "")
-        lines.append(f"  Последняя сводка:   {ts} UTC  {stat}")
-        if details:
-            lines.append(f"    Детали: {details}")
-    else:
-        lines.append("  Последняя сводка:   ещё не создана")
+    if not categories_data:
+        return json.dumps(
+            {"date": date_str, "summaries": {}, "article_counts": {}},
+            ensure_ascii=False,
+        )
 
-    # Общая статистика
-    total = status.get("total_headlines", 0)
-    today = date.today().isoformat()
-    today_headlines = storage.get_headlines(date=today, limit=1000)
-    lines.append(f"\n  Всего заголовков в базе: {total}")
-    lines.append(f"  Заголовков за сегодня ({today}): {len(today_headlines)}")
-    lines.append("\n  Расписание: сбор каждый час, сводка каждый день в 23:00")
+    # Инициализация LLM
+    try:
+        llm_fn = create_llm_fn(timeout=90.0)
+    except ValueError as exc:
+        return json.dumps(
+            {"error": f"LLM не настроен: {exc}"},
+            ensure_ascii=False,
+        )
 
-    return "\n".join(lines)
+    # Суммаризация каждой категории
+    from mcp_server.news_api import _CATEGORY_NAMES
+    summaries: dict[str, str] = {}
+    article_counts: dict[str, int] = {}
 
+    for category, articles in categories_data.items():
+        if not articles:
+            continue
 
-# ---------------------------------------------------------------------------
-# Инструмент 5: Принудительный сбор
-# ---------------------------------------------------------------------------
+        article_counts[category] = len(articles)
+        cat_name = _CATEGORY_NAMES.get(category, category.capitalize())
 
-@mcp.tool()
-def force_fetch_now() -> str:
-    """
-    Принудительно собрать новости прямо сейчас (не дожидаясь расписания).
+        # Формируем промпт
+        articles_text = "\n".join(
+            f"- {a['title']}"
+            + (f": {a['description']}" if a.get("description") else "")
+            for a in articles
+        )
+        prompt = (
+            f"Сделай краткую сводку новостей категории «{cat_name}» "
+            f"на русском языке, 3-5 предложений. Выдели главные события.\n\n"
+            f"Статьи ({len(articles)} шт.):\n{articles_text}"
+        )
 
-    Returns:
-        Количество новых заголовков и общее полученных
-    """
-    scheduler = _get_scheduler()
-    if scheduler is None:
-        # Если планировщик не инициализирован — выполняем сбор напрямую
-        storage = _get_storage()
         try:
-            from mcp_server.rss_parser import fetch_rss
-            items = fetch_rss()
-            new_count = storage.add_headlines(items)
-            storage.log_task(
-                "fetch_rss",
-                "success",
-                f"Получено {len(items)}, новых {new_count}",
-            )
-            return f"Собрано {len(items)} заголовков, из них новых: {new_count}"
+            summary = llm_fn(prompt)
+            summaries[category] = summary.strip()
         except Exception as exc:
-            storage.log_task("fetch_rss", "error", str(exc))
-            return f"Ошибка при сборе: {exc}"
+            summaries[category] = f"[Ошибка суммаризации: {exc}]"
 
-    result = scheduler.force_fetch()
-    return result
+    result = {
+        "date": date_str,
+        "summaries": summaries,
+        "article_counts": article_counts,
+    }
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
-# Инструмент 6: Принудительная генерация сводки
+# Инструмент 3: deliver_news
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def force_digest_now() -> str:
+def deliver_news(summaries_json: str) -> str:
     """
-    Принудительно сгенерировать сводку дня прямо сейчас.
+    Сохранить суммаризации в SQLite и отправить в Telegram.
+
+    Шаг 3/3 пайплайна. Финальный этап доставки.
+
+    Args:
+        summaries_json: JSON-строка из summarize_news.
 
     Returns:
-        Текст сгенерированной сводки или сообщение об ошибке
+        Отчёт о доставке: сколько категорий сохранено, отправлено ли в Telegram.
     """
-    scheduler = _get_scheduler()
-    if scheduler is None:
+    # Парсим входной JSON
+    try:
+        data = json.loads(summaries_json)
+    except json.JSONDecodeError as exc:
+        return f"Ошибка: невалидный JSON: {exc}"
+
+    if "error" in data:
+        return f"Ошибка от предыдущего шага: {data['error']}"
+
+    date_str = data.get("date", datetime.now(_MSK).strftime("%Y-%m-%d"))
+    summaries: dict[str, str] = data.get("summaries", {})
+    article_counts: dict[str, int] = data.get("article_counts", {})
+
+    if not summaries:
+        return "Нет суммаризаций для сохранения."
+
+    # Сохраняем в SQLite
+    db_path = get_db_path()
+    init_db(db_path)
+
+    saved_count = save_summaries(
+        date=date_str,
+        summaries=summaries,
+        article_counts=article_counts,
+        telegram_sent=False,
+        db_path=db_path,
+    )
+
+    # Помечаем ссылки как обработанные (дедупликация для следующего запуска)
+    # Получаем ссылки из оригинального fetch_news — они уже не нужны здесь,
+    # так как пометка произошла бы в fetch_news при следующем запуске
+    report_lines = [f"💾 Сохранено в SQLite: {saved_count} категорий"]
+
+    # Отправка в Telegram
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    if token and chat_id:
+        message = format_telegram_message(date_str, summaries)
+        success = send_telegram_message(message, token, chat_id)
+        if success:
+            mark_telegram_sent(date_str, db_path)
+            report_lines.append(f"📲 Telegram {chat_id}: отправлено")
+        else:
+            report_lines.append(f"📲 Telegram {chat_id}: ошибка отправки")
+    else:
+        report_lines.append("📲 Telegram: TELEGRAM_BOT_TOKEN не задан, пропуск")
+
+    return "\n".join(report_lines)
+
+
+# ---------------------------------------------------------------------------
+# Инструмент 4: run_news_pipeline (оркестратор)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def run_news_pipeline() -> str:
+    """
+    Запустить полный пайплайн: получение → суммаризация → доставка.
+
+    Использует настройки из .env:
+    - NEWS_RSS_FEEDS, NEWS_MAX_ARTICLES_PER_CATEGORY, NEWS_CATEGORIES
+    - NEWS_WORK_HOURS_START / NEWS_WORK_HOURS_END (рабочие часы МСК)
+    - TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+    Рабочие часы: пайплайн не запускается за пределами заданного окна.
+    Оркестратор вызывает fetch_news, summarize_news, deliver_news
+    как обычные Python-функции (все в одном процессе).
+
+    Returns:
+        Полный отчёт о выполнении пайплайна.
+    """
+    # Проверяем рабочие часы (МСК)
+    now_msk = datetime.now(_MSK)
+    start_hour = _get_env_int("NEWS_WORK_HOURS_START", 9)
+    end_hour = _get_env_int("NEWS_WORK_HOURS_END", 17)
+
+    if not (start_hour <= now_msk.hour < end_hour):
+        time_str = now_msk.strftime("%H:%M")
         return (
-            "Планировщик не инициализирован. "
-            "Запустите сервер через python -m mcp_server.news_server"
+            f"Пайплайн не запущен: нерабочее время ({time_str} МСК). "
+            f"Рабочее окно: {start_hour:02d}:00–{end_hour:02d}:00 МСК."
         )
 
-    if scheduler.llm_fn is None:
-        return (
-            "LLM не настроен. Проверьте .env: "
-            "QWEN_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY"
-        )
+    report_lines = [
+        f"🚀 Запуск пайплайна [{now_msk.strftime('%H:%M')} МСК]",
+        "",
+    ]
 
-    result = scheduler.force_digest()
-    return result
+    # Шаг 1: Получение новостей
+    report_lines.append("Шаг 1/3: получение новостей...")
+    news_json = fetch_news()
+
+    try:
+        news_data = json.loads(news_json)
+    except json.JSONDecodeError:
+        news_data = {}
+
+    if "error" in news_data:
+        report_lines.append(f"❌ Ошибка на шаге 1: {news_data['error']}")
+        return "\n".join(report_lines)
+
+    cats = news_data.get("categories", {})
+    total_articles = sum(len(v) for v in cats.values())
+    report_lines.append(
+        f"✅ Шаг 1/3: получено {total_articles} статей в {len(cats)} категориях"
+    )
+    for cat, articles in cats.items():
+        from mcp_server.news_api import _CATEGORY_NAMES
+        cat_name = _CATEGORY_NAMES.get(cat, cat)
+        report_lines.append(f"   {cat_name}: {len(articles)} статей")
+
+    # Пометить ссылки как обработанные (дедупликация)
+    db_path = get_db_path()
+    for cat, articles in cats.items():
+        links = [a["link"] for a in articles if a.get("link")]
+        mark_links_processed(links, category=cat, db_path=db_path)
+
+    report_lines.append("")
+
+    # Шаг 2: Суммаризация
+    report_lines.append("Шаг 2/3: суммаризация через LLM...")
+    summaries_json = summarize_news(news_json)
+
+    try:
+        summaries_data = json.loads(summaries_json)
+    except json.JSONDecodeError:
+        summaries_data = {}
+
+    if "error" in summaries_data:
+        report_lines.append(f"❌ Ошибка на шаге 2: {summaries_data['error']}")
+        return "\n".join(report_lines)
+
+    summaries = summaries_data.get("summaries", {})
+    report_lines.append(f"✅ Шаг 2/3: суммаризировано {len(summaries)} категорий")
+    report_lines.append("")
+
+    # Шаг 3: Доставка
+    report_lines.append("Шаг 3/3: сохранение и отправка...")
+    delivery_report = deliver_news(summaries_json)
+    report_lines.append(f"✅ {delivery_report}")
+    report_lines.append("")
+
+    # Итог
+    report_lines.append(
+        f"🎉 Пайплайн завершён: {total_articles} статей → "
+        f"{len(summaries)} суммаризаций → доставлено"
+    )
+    return "\n".join(report_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -328,30 +412,13 @@ def force_digest_now() -> str:
 if __name__ == "__main__":
     import sys
 
-    # Определяем путь к БД
-    db_path = Path("data/news.db")
-
-    # Инициализация хранилища
-    _storage = NewsStorage(db_path)
-
-    # Создание LLM-функции (из .env)
-    llm_fn = None
+    # Инициализируем БД при старте
+    db_path = get_db_path()
     try:
-        from mcp_server.llm_client import create_llm_fn
-        llm_fn = create_llm_fn()
-    except ValueError as exc:
-        # LLM не настроен — сервер запускается без генерации сводок
-        print(
-            f"Предупреждение: LLM не настроен ({exc}). "
-            "Генерация сводок будет недоступна.",
-            file=sys.stderr,
-        )
+        init_db(db_path)
+        print(f"БД инициализирована: {db_path}", file=sys.stderr)
     except Exception as exc:
-        print(f"Предупреждение: не удалось инициализировать LLM: {exc}", file=sys.stderr)
+        print(f"Предупреждение: не удалось инициализировать БД: {exc}", file=sys.stderr)
 
-    # Инициализация и запуск планировщика
-    _scheduler = NewsScheduler(_storage, llm_fn=llm_fn)
-    _scheduler.start()
-
-    # Запуск MCP-сервера в stdio-режиме (основной поток, блокирующий)
+    # Запуск MCP-сервера в stdio-режиме
     mcp.run()

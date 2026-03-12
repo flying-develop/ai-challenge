@@ -21,5 +21,5 @@
 - transport: stdio
 - command: python
 - args: -m mcp_server.news_server
-- описание: Сбор новостей РИА + дневные сводки (фоновый планировщик)
-- требует: доступ к интернету (ria.ru), LLM-провайдер в .env
+- описание: Новостной пайплайн Lenta.ru: fetch_news → summarize_news → deliver_news → run_news_pipeline
+- требует: доступ к интернету (lenta.ru), LLM-провайдер в .env, опционально TELEGRAM_BOT_TOKEN
