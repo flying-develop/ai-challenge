@@ -11,6 +11,7 @@
     Шаг 5 — deliver_news (SQLite + Telegram)
     Шаг 6 — run_news_pipeline (полный цикл одной командой)
     Шаг 7 — Проверка целостности данных
+    Шаг 8 — Отправка итогового отчёта в Telegram
     Итог  — Таблица с результатами тестов
 
 Образовательная концепция:
@@ -87,7 +88,7 @@ def _record(name: str, success: bool, details: str) -> None:
 # ---------------------------------------------------------------------------
 
 def step_check_env() -> None:
-    _step(1, 7, "Проверка окружения (.env)")
+    _step(1, 8, "Проверка окружения (.env)")
 
     vars_to_check = [
         ("NEWS_RSS_FEEDS",                 False, "URL RSS-фида"),
@@ -132,7 +133,7 @@ def step_check_env() -> None:
 
 def step_tool_discovery(client) -> dict[str, str]:
     """Список инструментов сервера."""
-    _step(2, 7, "Tool discovery (list_tools)")
+    _step(2, 8, "Tool discovery (list_tools)")
 
     try:
         tools = client.connect_and_list_tools()
@@ -167,7 +168,7 @@ def step_tool_discovery(client) -> dict[str, str]:
 
 def step_fetch_news(client) -> tuple[str, dict]:
     """Вызов fetch_news, возвращает (json_str, parsed_data)."""
-    _step(3, 7, "Шаг 1 пайплайна: fetch_news")
+    _step(3, 8, "Шаг 1 пайплайна: fetch_news")
 
     # Параметры из .env или defaults
     feed_url = os.environ.get("NEWS_RSS_FEEDS", "https://lenta.ru/rss").split(",")[0].strip()
@@ -232,7 +233,7 @@ def step_fetch_news(client) -> tuple[str, dict]:
 
 def step_summarize_news(client, news_json: str, news_data: dict) -> tuple[str, dict]:
     """Вызов summarize_news."""
-    _step(4, 7, "Шаг 2 пайплайна: summarize_news")
+    _step(4, 8, "Шаг 2 пайплайна: summarize_news")
 
     if not news_json or "error" in news_data:
         _fail("Пропуск: нет данных от fetch_news")
@@ -307,7 +308,7 @@ def step_summarize_news(client, news_json: str, news_data: dict) -> tuple[str, d
 
 def step_deliver_news(client, summaries_json: str) -> str:
     """Вызов deliver_news."""
-    _step(5, 7, "Шаг 3 пайплайна: deliver_news")
+    _step(5, 8, "Шаг 3 пайплайна: deliver_news")
 
     if not summaries_json:
         _fail("Пропуск: нет данных от summarize_news")
@@ -361,7 +362,7 @@ def step_deliver_news(client, summaries_json: str) -> str:
 
 def step_run_pipeline(client) -> str:
     """Вызов run_news_pipeline."""
-    _step(6, 7, "Полный пайплайн: run_news_pipeline")
+    _step(6, 8, "Полный пайплайн: run_news_pipeline")
 
     # Временно расширяем рабочее окно для демо
     # (изменяем env-переменные только для этого процесса)
@@ -415,7 +416,7 @@ def step_run_pipeline(client) -> str:
 
 def step_data_integrity(news_data: dict, summaries_data: dict) -> None:
     """Проверить что количество категорий на выходе fetch == на входе deliver."""
-    _step(7, 7, "Проверка целостности данных")
+    _step(7, 8, "Проверка целостности данных")
 
     cats_fetched = set(news_data.get("categories", {}).keys())
     cats_summarized = set(summaries_data.get("summaries", {}).keys())
@@ -461,6 +462,7 @@ def step_data_integrity(news_data: dict, summaries_data: dict) -> None:
 # Итоговая таблица
 # ---------------------------------------------------------------------------
 
+
 def print_summary() -> None:
     """Вывести итоговую таблицу результатов."""
     print()
@@ -485,6 +487,79 @@ def print_summary() -> None:
     print(f"  Итог: {overall}")
     _sep("═")
     print()
+
+
+# ---------------------------------------------------------------------------
+# Шаг 8: Отправка новостной сводки в Telegram (напрямую, без MCP)
+# ---------------------------------------------------------------------------
+
+def step_send_telegram_summary(summaries_data: dict) -> None:
+    """Отправить новостную сводку в Telegram — так же, как это делает deliver_news.
+
+    Образовательная концепция: показывает прямое использование
+    format_telegram_message + send_telegram_message из news_api.py.
+    Тот же механизм, что внутри MCP-инструмента deliver_news,
+    но вызванный напрямую из Python — без MCP overhead.
+
+    Если deliver_news (шаг 5) уже отправил сводку — этот шаг отправит её
+    повторно, чтобы показать формат сообщения явно.
+
+    Формат в Telegram:
+        📰 Новости за 12.03.2026
+
+        📊 Экономика:
+        ЦБ сохранил ставку 21%...
+
+        🌍 Мир:
+        Переговоры по Ближнему Востоку...
+    """
+    _step(8, 8, "Отправка новостной сводки в Telegram (прямой вызов)")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token or not chat_id:
+        _info("TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы — пропуск")
+        _info("Задайте в .env: TELEGRAM_BOT_TOKEN=... и TELEGRAM_CHAT_ID=@канал")
+        _record("Telegram summary", True, "нет токена, пропуск")
+        return
+
+    summaries = summaries_data.get("summaries", {})
+    date_str = summaries_data.get("date", datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d"))
+
+    if not summaries:
+        _info("Нет суммаризаций для отправки (суммаризация была пропущена)")
+        _record("Telegram summary", True, "0 суммаризаций, пропуск")
+        return
+
+    from mcp_server.news_api import format_telegram_message, send_telegram_message
+
+    # Формируем сообщение в том же формате, что deliver_news
+    message = format_telegram_message(date_str, summaries)
+
+    print(f"  Получатель: {chat_id}")
+    print(f"  Категорий в сводке: {len(summaries)}")
+    print(f"  Длина сообщения: {len(message)} символов")
+    print()
+    print("  Превью сообщения:")
+    _sep("·")
+    for line in message.split("\n")[:15]:
+        # Убираем markdown для чистого вывода в консоль
+        print(f"  {line.replace('*', '')}")
+    if message.count("\n") > 15:
+        print("  ...")
+    _sep("·")
+
+    print()
+    print(f"  Отправляю в Telegram {chat_id}...")
+    success = send_telegram_message(message, token, chat_id)
+
+    if success:
+        _ok(f"Сводка отправлена в {chat_id} ({len(summaries)} категорий)")
+        _record("Telegram summary", True, f"отправлено в {chat_id}")
+    else:
+        _fail("Не удалось отправить сводку в Telegram (проверьте токен и chat_id)")
+        _record("Telegram summary", False, "ошибка отправки")
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +626,9 @@ def main() -> None:
 
     # Шаг 7: Целостность данных
     step_data_integrity(news_data, summaries_data)
+
+    # Шаг 8: Отправка новостной сводки в Telegram напрямую
+    step_send_telegram_summary(summaries_data)
 
     # Итоговая таблица
     print_summary()
