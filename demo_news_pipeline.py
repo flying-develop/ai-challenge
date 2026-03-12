@@ -142,7 +142,7 @@ def step_check_env() -> None:
 # Шаг 2: Tool discovery
 # ---------------------------------------------------------------------------
 
-def step_tool_discovery(client) -> dict[str, str]:
+def step_tool_discovery(client) -> list[dict]:
     """Список инструментов сервера."""
     _step(2, 8, "Tool discovery (list_tools)")
 
@@ -151,13 +151,15 @@ def step_tool_discovery(client) -> dict[str, str]:
     except Exception as exc:
         _fail(f"Не удалось получить список инструментов: {exc}")
         _record("Tool discovery", False, str(exc))
-        return {}
+        return []
 
     expected_tools = {"fetch_news", "summarize_news", "deliver_news", "run_news_pipeline"}
-    found_tools = set(tools.keys())
+    found_tools = {tool["name"] for tool in tools}
 
     print(f"  Найдено инструментов: {len(found_tools)}")
-    for name, description in sorted(tools.items()):
+    for tool in sorted(tools, key=lambda tool: tool["name"]):
+        name = tool["name"]
+        description = tool.get("description", "")
         mark = "✅" if name in expected_tools else "ℹ️"
         short_desc = description[:60] + "..." if len(description) > 60 else description
         print(f"    {mark} {name}: {short_desc}")

@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS news_summaries (
     article_count   INTEGER,
     summary         TEXT NOT NULL,
     telegram_sent   INTEGER DEFAULT 0,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    UNIQUE (date, category)
 )
 """
 
@@ -92,6 +93,56 @@ def get_db_path() -> str:
     return os.environ.get("NEWS_DB_PATH", "data/news_pipeline.db")
 
 
+def _has_news_summaries_unique_key(conn: sqlite3.Connection) -> bool:
+    """Проверить наличие UNIQUE-ограничения/индекса на (date, category)."""
+    for row in conn.execute("PRAGMA index_list('news_summaries')"):
+        # row: seq, name, unique, origin, partial
+        if len(row) < 3 or not row[2]:
+            continue
+        index_name = row[1]
+        columns = [
+            info[2]
+            for info in conn.execute(f"PRAGMA index_info('{index_name}')")
+        ]
+        if columns == ["date", "category"]:
+            return True
+    return False
+
+
+def _ensure_news_summaries_schema(conn: sqlite3.Connection) -> None:
+    """Довести legacy-таблицу news_summaries до схемы с UNIQUE(date, category)."""
+    if _has_news_summaries_unique_key(conn):
+        return
+
+    try:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX uq_news_summaries_date_category
+            ON news_summaries(date, category)
+            """
+        )
+        return
+    except sqlite3.IntegrityError:
+        # В legacy-базе могли накопиться дубли по одной дате и категории.
+        # Оставляем самую позднюю запись по id и затем добавляем уникальный индекс.
+        conn.execute(
+            """
+            DELETE FROM news_summaries
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM news_summaries
+                GROUP BY date, category
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX uq_news_summaries_date_category
+            ON news_summaries(date, category)
+            """
+        )
+
+
 def init_db(db_path: str | None = None) -> str:
     """Создать таблицы в SQLite. Вернуть путь к файлу БД.
 
@@ -109,6 +160,7 @@ def init_db(db_path: str | None = None) -> str:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_CREATE_NEWS_SUMMARIES)
         conn.execute(_CREATE_PROCESSED_ARTICLES)
+        _ensure_news_summaries_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -208,25 +260,14 @@ def save_summaries(
                 INSERT INTO news_summaries
                     (date, category, article_count, summary, telegram_sent, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(date) DO NOTHING
+                ON CONFLICT(date, category) DO UPDATE SET
+                    article_count = excluded.article_count,
+                    summary = excluded.summary,
+                    telegram_sent = excluded.telegram_sent,
+                    created_at = excluded.created_at
                 """,
                 (date, category, article_count, summary_text, sent_flag, created_at),
             )
-            # Если ON CONFLICT не сработал (записи не было) — rowcount > 0
-            # Если запись уже есть — делаем UPDATE
-            existing = conn.execute(
-                "SELECT id FROM news_summaries WHERE date=? AND category=?",
-                (date, category),
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    """
-                    UPDATE news_summaries
-                    SET article_count=?, summary=?, telegram_sent=?, created_at=?
-                    WHERE date=? AND category=?
-                    """,
-                    (article_count, summary_text, sent_flag, created_at, date, category),
-                )
             count += 1
         conn.commit()
     finally:
