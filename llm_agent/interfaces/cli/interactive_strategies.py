@@ -211,14 +211,14 @@ MCP (Model Context Protocol):
   /convert 50000 RUB CNY   — конвертировать 50000 рублей в юани
   (Требует: сервер cbr_currencies в config/mcp-servers.md)
 
-НОВОСТИ (News Digest):
-  /news                    — последние 20 заголовков
-  /news digest             — последняя дневная сводка
-  /news digest <дата>      — сводка за дату (YYYY-MM-DD)
-  /news digest now         — принудительная генерация сводки (LLM)
-  /news status             — статус планировщика
-  /news fetch              — принудительный сбор новостей
-  (Требует: сервер news_digest в config/mcp-servers.md)
+НОВОСТИ (News Pipeline — Lenta.ru):
+  /news                    — полный пайплайн: RSS → LLM → SQLite + Telegram
+  /news status             — статус: последний запуск, категории, флаг Telegram
+  /news history [N]        — последние N суммаризаций из БД (по умолчанию 10)
+  /news fetch              — только шаг 1: получить новости из RSS
+  /news summarize          — шаги 1-2: получить + суммаризировать через LLM
+  (Требует: сервер news_digest в config/mcp-servers.md, LLM-ключ в .env)
+  (Telegram: задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID в .env)
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -738,15 +738,15 @@ def _handle_convert_command(args: list[str], mcp_state: dict) -> None:
 
 
 def _handle_news_command(parts: list[str], mcp_state: dict) -> None:
-    """Обработать /news [digest [<дата>|now] | status | fetch].
+    """Обработать /news [status | history [N] | fetch | summarize].
 
     Примеры:
-        /news                    — последние 20 заголовков
-        /news digest             — последняя дневная сводка
-        /news digest 2026-03-11  — сводка за дату
-        /news digest now         — принудительная генерация сводки
-        /news status             — статус планировщика
-        /news fetch              — принудительный сбор новостей
+        /news                    — полный пайплайн: RSS → LLM → SQLite + Telegram
+        /news status             — статус последнего запуска из SQLite
+        /news history            — последние 10 суммаризаций из БД
+        /news history 5          — последние 5 суммаризаций
+        /news fetch              — только шаг 1: получить новости из RSS
+        /news summarize          — шаги 1-2: получить + суммаризировать
     """
     if not _MCP_AVAILABLE:
         print("❌ MCP: пакет mcp не установлен.")
@@ -776,38 +776,118 @@ def _handle_news_command(parts: list[str], mcp_state: dict) -> None:
 
     try:
         if not args:
-            print("📰 Получаю последние заголовки...")
-            print(client.call_tool("get_latest_headlines", {"limit": 20}))
-
-        elif args[0] == "digest":
-            if len(args) == 1:
-                print("📝 Получаю последнюю сводку...")
-                print(client.call_tool("get_daily_digest", {}))
-            elif args[1] == "now":
-                print("📝 Генерирую сводку за сегодня (LLM-вызов, ~10 секунд)...")
-                print(client.call_tool("force_digest_now", {}))
-            else:
-                date_str = args[1]
-                print(f"📝 Получаю сводку за {date_str}...")
-                print(client.call_tool("get_daily_digest", {"date_str": date_str}))
+            # /news → запустить полный пайплайн
+            print("🚀 Запускаю пайплайн (fetch → summarize → deliver)...")
+            print(client.call_tool("run_news_pipeline", {}))
 
         elif args[0] == "status":
-            print("⏰ Статус планировщика...")
-            print(client.call_tool("get_scheduler_status", {}))
+            # /news status → читаем SQLite напрямую (без MCP overhead)
+            print("📊 Статус пайплайна...")
+            try:
+                from mcp_server.news_api import get_pipeline_status, get_db_path
+                status = get_pipeline_status(get_db_path())
+                total = status.get("total_summaries", 0)
+                last_date = status.get("last_date")
+                last_run = status.get("last_run_at", "")
+                print(f"  Всего суммаризаций в БД: {total}")
+                if last_date:
+                    run_time = last_run[:19].replace("T", " ") if last_run else "—"
+                    print(f"  Последний запуск: {last_date} (создано {run_time} UTC)")
+                else:
+                    print("  Пайплайн ещё не запускался")
+                last_sums = status.get("last_summaries", [])
+                if last_sums:
+                    print("\n  Последние суммаризации:")
+                    for s in last_sums[:6]:
+                        tg = "📲" if s.get("telegram_sent") else "💾"
+                        print(f"    {tg} {s['date']} / {s['category']} ({s.get('article_count', 0)} статей)")
+            except ImportError:
+                print("  (модуль news_api недоступен)")
+
+        elif args[0] == "history":
+            # /news history [N] → последние N суммаризаций из SQLite
+            limit = 10
+            if len(args) > 1:
+                try:
+                    limit = int(args[1])
+                except ValueError:
+                    print(f"Ошибка: '{args[1]}' — не число. Используйте: /news history 5")
+                    return
+            print(f"📖 Последние {limit} суммаризаций из БД...")
+            try:
+                from mcp_server.news_api import get_summaries, get_db_path, _CATEGORY_NAMES
+                rows = get_summaries(limit=limit, db_path=get_db_path())
+                if not rows:
+                    print("  История пуста. Запустите /news для создания суммаризаций.")
+                else:
+                    for row in rows:
+                        cat = row.get("category", "")
+                        cat_name = _CATEGORY_NAMES.get(cat, cat)
+                        date_str = row.get("date", "")
+                        count = row.get("article_count", 0)
+                        tg = "📲" if row.get("telegram_sent") else "💾"
+                        print(f"\n  {tg} {date_str} / {cat_name} ({count} статей):")
+                        summary = row.get("summary", "")
+                        preview = summary[:200] + ("..." if len(summary) > 200 else "")
+                        print(f"  {preview}")
+            except ImportError:
+                print("  (модуль news_api недоступен)")
 
         elif args[0] == "fetch":
-            print("📡 Принудительный сбор новостей...")
-            result = client.call_tool("force_fetch_now", {})
-            print(f"✅ {result}")
+            # /news fetch → только шаг 1: получить новости из RSS
+            print("📡 Шаг 1/3: получение новостей...")
+            import json as _json
+            result = client.call_tool("fetch_news", {})
+            try:
+                data = _json.loads(result)
+                if "error" in data:
+                    print(f"❌ {data['error']}")
+                else:
+                    cats = data.get("categories", {})
+                    total = sum(len(v) for v in cats.values())
+                    print(f"✅ Получено {total} статей в {len(cats)} категориях:")
+                    try:
+                        from mcp_server.news_api import _CATEGORY_NAMES
+                    except ImportError:
+                        _CATEGORY_NAMES = {}
+                    for cat, articles in sorted(cats.items()):
+                        cat_name = _CATEGORY_NAMES.get(cat, cat)
+                        print(f"   {cat_name}: {len(articles)} статей")
+            except Exception:
+                print(result)
+
+        elif args[0] == "summarize":
+            # /news summarize → шаги 1-2: fetch + summarize
+            print("📡 Шаг 1/3: получение новостей...")
+            news_json = client.call_tool("fetch_news", {})
+            print("🧠 Шаг 2/3: суммаризация через LLM...")
+            import json as _json
+            result = client.call_tool("summarize_news", {"news_json": news_json})
+            try:
+                data = _json.loads(result)
+                if "error" in data:
+                    print(f"❌ {data['error']}")
+                else:
+                    summaries = data.get("summaries", {})
+                    try:
+                        from mcp_server.news_api import _CATEGORY_NAMES, _CATEGORY_EMOJI
+                    except ImportError:
+                        _CATEGORY_NAMES, _CATEGORY_EMOJI = {}, {}
+                    for cat, summary in sorted(summaries.items()):
+                        cat_name = _CATEGORY_NAMES.get(cat, cat)
+                        emoji = _CATEGORY_EMOJI.get(cat, "📌")
+                        print(f"\n{emoji} {cat_name}:")
+                        print(f"  {summary}")
+            except Exception:
+                print(result)
 
         else:
             print("Использование:")
-            print("  /news                    — последние 20 заголовков")
-            print("  /news digest             — последняя дневная сводка")
-            print("  /news digest <дата>      — сводка за дату (YYYY-MM-DD)")
-            print("  /news digest now         — принудительная генерация сводки")
-            print("  /news status             — статус планировщика")
-            print("  /news fetch              — принудительный сбор новостей")
+            print("  /news                    — полный пайплайн (fetch→summarize→deliver)")
+            print("  /news status             — статус последнего запуска")
+            print("  /news history [N]        — последние N суммаризаций из БД")
+            print("  /news fetch              — только получить новости (шаг 1)")
+            print("  /news summarize          — получить + суммаризировать (шаги 1-2)")
 
     except (RuntimeError, ValueError) as exc:
         print(str(exc))
