@@ -124,6 +124,17 @@ def step_check_env() -> None:
         _fail("LLM API ключ не задан (QWEN_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)")
         all_ok = False
 
+    # Подсказка по Telegram: если токен есть, но chat_id не задан — предлагаем узнать его
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if tg_token and not tg_chat:
+        print()
+        _info("Токен Telegram задан, но TELEGRAM_CHAT_ID пустой.")
+        _info("Чтобы бот слал сводки лично вам:")
+        _info("  1. Напишите боту /start в Telegram")
+        _info("  2. python -m mcp_server.news_api  — покажет ваш chat_id")
+        _info("  3. Добавьте в .env: TELEGRAM_CHAT_ID=<число>")
+
     _record("Env check", True, "проверено")  # Не блокируем при отсутствии ключей
 
 

@@ -641,6 +641,76 @@ def send_telegram_message(
 
 
 # ---------------------------------------------------------------------------
+# Telegram: получить свой chat_id
+# ---------------------------------------------------------------------------
+
+def get_my_chat_id(token: str) -> list[dict]:
+    """Получить chat_id(ы) из последних входящих сообщений бота.
+
+    Образовательная концепция: Telegram Bot API → getUpdates.
+    Используется один раз при настройке — чтобы узнать свой числовой chat_id
+    и записать его в .env как TELEGRAM_CHAT_ID.
+
+    Порядок действий:
+        1. Создать бота у @BotFather → получить токен
+        2. Написать боту /start в личных сообщениях
+        3. Вызвать get_my_chat_id(token) → получить свой chat_id
+        4. Записать в .env: TELEGRAM_CHAT_ID=<chat_id>
+
+    Args:
+        token: Telegram Bot Token.
+
+    Returns:
+        Список dict: [{"chat_id": 123456789, "username": "ivan", "first_name": "Ivan", "type": "private"}, ...]
+        Пустой список если ни одного сообщения нет.
+
+    Raises:
+        RuntimeError: Если токен неверный или API недоступен.
+    """
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ошибка Telegram API {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ошибка сети при вызове Telegram: {exc}") from exc
+
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API вернул ошибку: {data}")
+
+    results = data.get("result", [])
+    seen_chats: set[int] = set()
+    chats: list[dict] = []
+
+    for update in results:
+        # Ищем chat во всех возможных полях
+        msg = (
+            update.get("message")
+            or update.get("channel_post")
+            or update.get("edited_message")
+            or update.get("callback_query", {}).get("message")
+        )
+        if not msg:
+            continue
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id")
+        if chat_id and chat_id not in seen_chats:
+            seen_chats.add(chat_id)
+            chats.append({
+                "chat_id": chat_id,
+                "username": chat.get("username", ""),
+                "first_name": chat.get("first_name", ""),
+                "last_name": chat.get("last_name", ""),
+                "type": chat.get("type", ""),  # private / group / channel
+            })
+
+    return chats
+
+
+# ---------------------------------------------------------------------------
 # Формирование Telegram-сообщения
 # ---------------------------------------------------------------------------
 
@@ -688,3 +758,67 @@ def format_telegram_message(date: str, summaries: dict[str, str]) -> str:
         lines.append("")
 
     return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# Утилита настройки: python -m mcp_server.news_api
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    """Утилита для получения Telegram chat_id.
+
+    Запуск:
+        python -m mcp_server.news_api
+
+    Выводит chat_id всех пользователей/каналов, которые писали боту.
+    После запуска запишите нужный chat_id в .env:
+        TELEGRAM_CHAT_ID=123456789
+    """
+    import sys
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        print("❌ TELEGRAM_BOT_TOKEN не задан в .env")
+        print("   Создайте бота у @BotFather и добавьте токен в .env")
+        sys.exit(1)
+
+    print(f"🤖 Токен: {token[:10]}...{token[-4:]}")
+    print("   Проверяю входящие сообщения бота (getUpdates)...")
+    print()
+
+    try:
+        chats = get_my_chat_id(token)
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
+        sys.exit(1)
+
+    if not chats:
+        print("⚠️  Нет входящих сообщений.")
+        print()
+        print("   Что нужно сделать:")
+        print("   1. Найдите своего бота в Telegram")
+        print("   2. Нажмите START или напишите /start")
+        print("   3. Запустите этот скрипт снова")
+        sys.exit(0)
+
+    print(f"✅ Найдено чатов: {len(chats)}")
+    print()
+    for ch in chats:
+        chat_type = ch["type"]
+        name_parts = [ch.get("first_name", ""), ch.get("last_name", "")]
+        name = " ".join(p for p in name_parts if p)
+        username = f"@{ch['username']}" if ch.get("username") else ""
+        label = f"{name} {username}".strip() or f"[{chat_type}]"
+        print(f"   {'👤' if chat_type == 'private' else '👥'} {label}")
+        print(f"      chat_id: {ch['chat_id']}")
+        print(f"      type:    {chat_type}")
+        print()
+
+    print("─" * 50)
+    print("Добавьте в .env:")
+    if chats:
+        first = chats[0]
+        print(f"   TELEGRAM_CHAT_ID={first['chat_id']}")
+    print()
+    print("Проверить отправку:")
+    print("   python demo_news_pipeline.py")
