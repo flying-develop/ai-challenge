@@ -244,6 +244,76 @@ def handle_convert(args_str: str, servers: dict[str, MCPServerConfig]) -> None:
         print(str(exc))
 
 
+def handle_news(args_str: str, servers: dict[str, MCPServerConfig]) -> None:
+    """
+    Обработчик команды /news.
+
+    Форматы:
+        /news                    — последние 20 заголовков
+        /news digest             — последняя дневная сводка
+        /news digest <дата>      — сводка за конкретную дату (YYYY-MM-DD)
+        /news digest now         — принудительная генерация сводки
+        /news status             — статус планировщика
+        /news fetch              — принудительный сбор новостей
+    """
+    client = _get_mcp_client("news_digest", servers)
+    if client is None:
+        print("MCP-сервер 'news_digest' не сконфигурирован.")
+        print("Добавьте его в config/mcp-servers.md")
+        return
+
+    parts = args_str.strip().split() if args_str.strip() else []
+
+    try:
+        if not parts:
+            # /news → последние заголовки
+            print("📰 Получаю последние заголовки...")
+            result = client.call_tool("get_latest_headlines", {"limit": 20})
+            print(result)
+
+        elif parts[0] == "digest":
+            if len(parts) == 1:
+                # /news digest → последняя сводка
+                print("📝 Получаю последнюю сводку...")
+                result = client.call_tool("get_daily_digest", {})
+                print(result)
+            elif parts[1] == "now":
+                # /news digest now → принудительная генерация
+                print("📝 Генерирую сводку за сегодня (LLM-вызов, ~10 секунд)...")
+                result = client.call_tool("force_digest_now", {})
+                print(result)
+            else:
+                # /news digest 2026-03-11 → сводка за дату
+                date_str = parts[1]
+                print(f"📝 Получаю сводку за {date_str}...")
+                result = client.call_tool("get_daily_digest", {"date_str": date_str})
+                print(result)
+
+        elif parts[0] == "status":
+            # /news status → статус планировщика
+            print("⏰ Статус планировщика...")
+            result = client.call_tool("get_scheduler_status", {})
+            print(result)
+
+        elif parts[0] == "fetch":
+            # /news fetch → принудительный сбор
+            print("📡 Принудительный сбор новостей...")
+            result = client.call_tool("force_fetch_now", {})
+            print(f"✅ {result}")
+
+        else:
+            print("Использование:")
+            print("  /news                    — последние 20 заголовков")
+            print("  /news digest             — последняя дневная сводка")
+            print("  /news digest <дата>      — сводка за дату (YYYY-MM-DD)")
+            print("  /news digest now         — принудительная генерация сводки")
+            print("  /news status             — статус планировщика")
+            print("  /news fetch              — принудительный сбор новостей")
+
+    except RuntimeError as exc:
+        print(str(exc))
+
+
 def run_interactive(agent: SimpleAgent, history_count: int) -> None:
     """Запустить интерактивный цикл чата до выхода пользователя."""
     # Загружаем конфигурацию MCP-серверов один раз при старте
@@ -259,6 +329,7 @@ def run_interactive(agent: SimpleAgent, history_count: int) -> None:
             "Интерактивный режим. "
             "Введите 'exit'/'quit' для выхода, 'clear' для сброса истории.\n"
             "Команды: /mcp call <server> <tool> [key=value ...], /convert <сумма> <валюта>\n"
+            "Новости: /news, /news digest [<дата>|now], /news status, /news fetch\n"
         )
 
     while True:
@@ -308,6 +379,12 @@ def run_interactive(agent: SimpleAgent, history_count: int) -> None:
         # Команда /convert
         if user_input.startswith("/convert"):
             handle_convert(user_input[len("/convert"):].strip(), mcp_servers)
+            print()
+            continue
+
+        # Команды /news
+        if user_input.startswith("/news"):
+            handle_news(user_input[len("/news"):].strip(), mcp_servers)
             print()
             continue
 

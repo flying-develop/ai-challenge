@@ -211,6 +211,15 @@ MCP (Model Context Protocol):
   /convert 50000 RUB CNY   — конвертировать 50000 рублей в юани
   (Требует: сервер cbr_currencies в config/mcp-servers.md)
 
+НОВОСТИ (News Digest):
+  /news                    — последние 20 заголовков
+  /news digest             — последняя дневная сводка
+  /news digest <дата>      — сводка за дату (YYYY-MM-DD)
+  /news digest now         — принудительная генерация сводки (LLM)
+  /news status             — статус планировщика
+  /news fetch              — принудительный сбор новостей
+  (Требует: сервер news_digest в config/mcp-servers.md)
+
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
   /help                  — эта справка
@@ -724,6 +733,82 @@ def _handle_convert_command(args: list[str], mcp_state: dict) -> None:
             "direction": direction,
         })
         print(f"💱 {result}")
+    except (RuntimeError, ValueError) as exc:
+        print(str(exc))
+
+
+def _handle_news_command(parts: list[str], mcp_state: dict) -> None:
+    """Обработать /news [digest [<дата>|now] | status | fetch].
+
+    Примеры:
+        /news                    — последние 20 заголовков
+        /news digest             — последняя дневная сводка
+        /news digest 2026-03-11  — сводка за дату
+        /news digest now         — принудительная генерация сводки
+        /news status             — статус планировщика
+        /news fetch              — принудительный сбор новостей
+    """
+    if not _MCP_AVAILABLE:
+        print("❌ MCP: пакет mcp не установлен.")
+        print("   Установите: pip install mcp")
+        return
+
+    config_parser: MCPConfigParser = mcp_state.get("config_parser")
+    if config_parser is None:
+        print("❌ MCP: конфигурация не загружена.")
+        return
+
+    try:
+        servers = config_parser.load()
+    except EnvironmentError as exc:
+        print(exc)
+        return
+
+    found = next((s for s in servers if s.name == "news_digest"), None)
+    if found is None:
+        print("MCP-сервер 'news_digest' не сконфигурирован.")
+        print("Добавьте в config/mcp-servers.md секцию ## news_digest")
+        return
+
+    client = MCPClient(found)
+    # parts[0] == "/news", parts[1:] — аргументы
+    args = parts[1:]
+
+    try:
+        if not args:
+            print("📰 Получаю последние заголовки...")
+            print(client.call_tool("get_latest_headlines", {"limit": 20}))
+
+        elif args[0] == "digest":
+            if len(args) == 1:
+                print("📝 Получаю последнюю сводку...")
+                print(client.call_tool("get_daily_digest", {}))
+            elif args[1] == "now":
+                print("📝 Генерирую сводку за сегодня (LLM-вызов, ~10 секунд)...")
+                print(client.call_tool("force_digest_now", {}))
+            else:
+                date_str = args[1]
+                print(f"📝 Получаю сводку за {date_str}...")
+                print(client.call_tool("get_daily_digest", {"date_str": date_str}))
+
+        elif args[0] == "status":
+            print("⏰ Статус планировщика...")
+            print(client.call_tool("get_scheduler_status", {}))
+
+        elif args[0] == "fetch":
+            print("📡 Принудительный сбор новостей...")
+            result = client.call_tool("force_fetch_now", {})
+            print(f"✅ {result}")
+
+        else:
+            print("Использование:")
+            print("  /news                    — последние 20 заголовков")
+            print("  /news digest             — последняя дневная сводка")
+            print("  /news digest <дата>      — сводка за дату (YYYY-MM-DD)")
+            print("  /news digest now         — принудительная генерация сводки")
+            print("  /news status             — статус планировщика")
+            print("  /news fetch              — принудительный сбор новостей")
+
     except (RuntimeError, ValueError) as exc:
         print(str(exc))
 
@@ -1305,6 +1390,14 @@ def handle_command(
             print("MCP не настроен.")
             return current_strategy_num, True
         _handle_convert_command(parts[1:], mcp_state)
+        return current_strategy_num, True
+
+    # ---- Новости ----
+    if command == "/news":
+        if mcp_state is None:
+            print("MCP не настроен.")
+            return current_strategy_num, True
+        _handle_news_command(parts, mcp_state)
         return current_strategy_num, True
 
     # ---- Общие ----
