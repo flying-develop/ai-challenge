@@ -220,6 +220,15 @@ MCP (Model Context Protocol):
   (Требует: сервер news_digest в config/mcp-servers.md, LLM-ключ в .env)
   (Telegram: задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID в .env)
 
+ИССЛЕДОВАНИЕ (Orchestration MCP — двухпроходный агент):
+  /research "<запрос>"     — двухпроходное исследование (8 этапов)
+    Пример: /research "хочу сходить в кино в эти выходные"
+  /research status         — текущий этап и прогресс последнего исследования
+  /research log            — полный журнал последнего исследования
+  /research last           — финальный ответ последнего исследования
+  (Требует: LLM-ключ в .env; SEARCH_MODE=mock работает без ключей Яндекса)
+  (Telegram: задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID в .env)
+
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
   /help                  — эта справка
@@ -893,6 +902,167 @@ def _handle_news_command(parts: list[str], mcp_state: dict) -> None:
         print(str(exc))
 
 
+def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
+    """Обработать /research [<запрос> | status | log | last].
+
+    Примеры:
+        /research "хочу сходить в кино в эти выходные"
+        /research status
+        /research log
+        /research last
+    """
+    if not _MCP_AVAILABLE:
+        print("❌ MCP: пакет mcp не установлен.")
+        print("   Установите: pip install mcp")
+        return
+
+    # parts[0] == "/research"
+    args = parts[1:]
+
+    # Без аргументов — показываем помощь
+    if not args:
+        print("Использование:")
+        print('  /research "<запрос>"  — запустить исследование')
+        print('  /research status      — текущий этап и прогресс')
+        print('  /research log         — журнал последнего исследования')
+        print('  /research last        — финальный ответ последнего исследования')
+        return
+
+    sub = args[0].lower()
+
+    # /research status
+    if sub == "status":
+        state = mcp_state.get("research_state")
+        ctx = mcp_state.get("research_context")
+        if state is None or ctx is None:
+            print("Нет активного исследования. Запустите: /research \"ваш запрос\"")
+            return
+        print(f"  Задача:  {ctx.task[:80]}")
+        print(f"  Этап:    {state}")
+        print(f"  task_id: {ctx.task_id}")
+        print(f"  Ссылок собрано: {ctx.total_links}")
+        print(f"  Документов: {ctx.total_docs}")
+        elapsed = ctx.elapsed
+        print(f"  Время:   {elapsed:.1f}с")
+        return
+
+    # /research log
+    if sub == "log":
+        ctx = mcp_state.get("research_context")
+        if ctx is None:
+            print("Нет активного исследования.")
+            return
+        journal_client = mcp_state.get("research_journal_client")
+        if journal_client is None:
+            try:
+                from mcp_client.client import MCPClient
+                from mcp_client.config import MCPServerConfig
+                journal_client = MCPClient(MCPServerConfig(
+                    name="journal_server", transport="stdio",
+                    description="Journal", command="python",
+                    args=["-m", "mcp_server.journal_server"],
+                ))
+                mcp_state["research_journal_client"] = journal_client
+            except Exception as exc:
+                print(f"Ошибка создания journal-клиента: {exc}")
+                return
+        try:
+            log = journal_client.call_tool("get_log", {"task_id": ctx.task_id})
+            print(f"\n{log}\n")
+        except Exception as exc:
+            print(f"Ошибка получения журнала: {exc}")
+        return
+
+    # /research last
+    if sub == "last":
+        ctx = mcp_state.get("research_context")
+        if ctx is None or not ctx.final_result:
+            print("Нет сохранённого результата. Запустите: /research \"ваш запрос\"")
+            return
+        print(f"\n{'─' * 60}")
+        print(f"Задача: {ctx.task}")
+        print(f"{'─' * 60}")
+        print(ctx.final_result)
+        print(f"{'─' * 60}\n")
+        return
+
+    # /research "<запрос>" — запустить исследование
+    # Собираем запрос из оставшихся частей
+    task = " ".join(args).strip().strip('"').strip("'")
+    if not task:
+        print('Укажите запрос: /research "что искать"')
+        return
+
+    # Создаём клиенты для 4 серверов
+    try:
+        from mcp_client.client import MCPClient
+        from mcp_client.config import MCPServerConfig
+
+        def _mk(module: str, name: str) -> MCPClient:
+            return MCPClient(MCPServerConfig(
+                name=name, transport="stdio", description=name,
+                command="python", args=["-m", module],
+            ))
+
+        servers = {
+            "search":   _mk("mcp_server.search_server",   "search_server"),
+            "scraper":  _mk("mcp_server.scraper_server",  "scraper_server"),
+            "telegram": _mk("mcp_server.telegram_server", "telegram_server"),
+            "journal":  _mk("mcp_server.journal_server",  "journal_server"),
+        }
+    except Exception as exc:
+        print(f"❌ Ошибка создания MCP-клиентов: {exc}")
+        return
+
+    # Создаём LLM-функцию
+    try:
+        from mcp_server.llm_client import create_llm_fn
+        llm_fn = create_llm_fn(timeout=60.0)
+    except ValueError as exc:
+        print(f"❌ LLM недоступен: {exc}")
+        print("   Задайте QWEN_API_KEY, OPENAI_API_KEY или ANTHROPIC_API_KEY в .env")
+        return
+    except Exception as exc:
+        print(f"❌ Ошибка инициализации LLM: {exc}")
+        return
+
+    # Запускаем оркестратор
+    try:
+        from orchestrator.research_orchestrator import ResearchOrchestrator
+    except ImportError as exc:
+        print(f"❌ orchestrator не найден: {exc}")
+        print("   Убедитесь, что папка orchestrator/ существует в корне проекта.")
+        return
+
+    import os as _os
+    chat_id = _os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    print(f'\n🎬 Запускаю исследование: "{task}"')
+    print("   Это займёт 30-60 секунд...\n")
+
+    orchestrator = ResearchOrchestrator(
+        mcp_clients=servers,
+        llm_fn=llm_fn,
+        verbose=True,
+    )
+
+    try:
+        result = orchestrator.run(task, chat_id=chat_id)
+        # Сохраняем контекст для /research status/log/last
+        mcp_state["research_state"] = str(orchestrator.state.value)
+        mcp_state["research_context"] = orchestrator.context
+        mcp_state["research_journal_client"] = servers["journal"]
+
+        print(f"\n{'─' * 60}")
+        print("Финальный ответ:")
+        print("─" * 60)
+        print(result[:3000] + ("..." if len(result) > 3000 else ""))
+        print("─" * 60)
+        print("\nИспользуйте /research log для полного журнала этапов.\n")
+    except Exception as exc:
+        print(f"\n❌ Ошибка исследования: {exc}\n")
+
+
 def _handle_mcp_command(parts: list[str], mcp_state: dict) -> None:
     """Обработать /mcp <подкоманда> ...
 
@@ -1478,6 +1648,14 @@ def handle_command(
             print("MCP не настроен.")
             return current_strategy_num, True
         _handle_news_command(parts, mcp_state)
+        return current_strategy_num, True
+
+    # ---- Исследование (Orchestration MCP) ----
+    if command == "/research":
+        if mcp_state is None:
+            print("MCP не настроен.")
+            return current_strategy_num, True
+        _handle_research_command(parts, mcp_state)
         return current_strategy_num, True
 
     # ---- Общие ----
