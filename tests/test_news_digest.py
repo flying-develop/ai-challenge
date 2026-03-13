@@ -10,11 +10,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from mcp_server.news_api import init_db, save_summaries
 from mcp_server.rss_parser import parse_rss_from_bytes, _parse_pub_date
 from mcp_server.news_storage import NewsStorage
 
@@ -325,3 +327,90 @@ class TestNewsStorage:
         digest = s2.get_digest("2026-03-11")
         assert digest is not None
         assert digest["digest_text"] == "Тестовая сводка."
+
+
+class TestNewsPipelineApi:
+    """Тесты SQLite-слоя news_api."""
+
+    def test_init_db_creates_unique_key_for_date_and_category(self, tmp_path: Path):
+        """Новая БД создаётся с уникальностью по (date, category)."""
+        db_path = tmp_path / "news_pipeline.db"
+
+        init_db(str(db_path))
+
+        conn = sqlite3.connect(db_path)
+        try:
+            indexes = conn.execute("PRAGMA index_list('news_summaries')").fetchall()
+            unique_indexes = [row for row in indexes if row[2]]
+            assert unique_indexes
+
+            columns = []
+            for row in unique_indexes:
+                info = conn.execute(f"PRAGMA index_info('{row[1]}')").fetchall()
+                columns.append([item[2] for item in info])
+
+            assert ["date", "category"] in columns
+        finally:
+            conn.close()
+
+    def test_init_db_migrates_legacy_schema_and_deduplicates_rows(self, tmp_path: Path):
+        """Legacy-таблица без UNIQUE мигрируется без падения save_summaries."""
+        db_path = tmp_path / "legacy_news_pipeline.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE news_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    article_count INTEGER,
+                    summary TEXT NOT NULL,
+                    telegram_sent INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO news_summaries
+                    (date, category, article_count, summary, telegram_sent, created_at)
+                VALUES ('2026-03-12', 'world', 1, 'old summary', 0, '2026-03-12T10:00:00')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO news_summaries
+                    (date, category, article_count, summary, telegram_sent, created_at)
+                VALUES ('2026-03-12', 'world', 2, 'newer summary', 0, '2026-03-12T11:00:00')
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        init_db(str(db_path))
+        saved = save_summaries(
+            date="2026-03-12",
+            summaries={"world": "updated summary", "economics": "econ summary"},
+            article_counts={"world": 3, "economics": 5},
+            db_path=str(db_path),
+        )
+
+        assert saved == 2
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT date, category, article_count, summary
+                FROM news_summaries
+                ORDER BY category
+                """
+            ).fetchall()
+            assert rows == [
+                ("2026-03-12", "economics", 5, "econ summary"),
+                ("2026-03-12", "world", 3, "updated summary"),
+            ]
+        finally:
+            conn.close()
