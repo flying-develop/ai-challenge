@@ -902,6 +902,29 @@ def _handle_news_command(parts: list[str], mcp_state: dict) -> None:
         print(str(exc))
 
 
+def _print_journal_fallback(mcp_state: dict, task_id: str) -> None:
+    """Показать журнал из общей БД (нет локального контекста CLI)."""
+    journal_client = mcp_state.get("research_journal_client")
+    if journal_client is None:
+        try:
+            from mcp_client.client import MCPClient
+            from mcp_client.config import MCPServerConfig
+            journal_client = MCPClient(MCPServerConfig(
+                name="journal_server", transport="stdio",
+                description="Journal", command="python",
+                args=["-m", "mcp_server.journal_server"],
+            ))
+            mcp_state["research_journal_client"] = journal_client
+        except Exception as exc:
+            print(f"Ошибка создания journal-клиента: {exc}")
+            return
+    try:
+        log = journal_client.call_tool("get_log", {"task_id": task_id})
+        print(f"\n{log}\n")
+    except Exception as exc:
+        print(f"Ошибка получения журнала: {exc}")
+
+
 def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
     """Обработать /research [<запрос> | status | log | last].
 
@@ -934,24 +957,23 @@ def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
     if sub == "status":
         state = mcp_state.get("research_state")
         ctx = mcp_state.get("research_context")
-        if state is None or ctx is None:
-            print("Нет активного исследования. Запустите: /research \"ваш запрос\"")
-            return
-        print(f"  Задача:  {ctx.task[:80]}")
-        print(f"  Этап:    {state}")
-        print(f"  task_id: {ctx.task_id}")
-        print(f"  Ссылок собрано: {ctx.total_links}")
-        print(f"  Документов: {ctx.total_docs}")
-        elapsed = ctx.elapsed
-        print(f"  Время:   {elapsed:.1f}с")
+        if state is not None and ctx is not None:
+            print(f"  Задача:  {ctx.task[:80]}")
+            print(f"  Этап:    {state}")
+            print(f"  task_id: {ctx.task_id}")
+            print(f"  Ссылок собрано: {ctx.total_links}")
+            print(f"  Документов: {ctx.total_docs}")
+            elapsed = ctx.elapsed
+            print(f"  Время:   {elapsed:.1f}с")
+        else:
+            # Нет локального контекста — читаем из общей БД (Telegram bot или прошлая сессия)
+            print("  (локальный контекст CLI отсутствует — читаю из общего журнала БД)\n")
+            _print_journal_fallback(mcp_state, task_id="")
         return
 
     # /research log
     if sub == "log":
         ctx = mcp_state.get("research_context")
-        if ctx is None:
-            print("Нет активного исследования.")
-            return
         journal_client = mcp_state.get("research_journal_client")
         if journal_client is None:
             try:
@@ -966,8 +988,9 @@ def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
             except Exception as exc:
                 print(f"Ошибка создания journal-клиента: {exc}")
                 return
+        task_id = ctx.task_id if ctx is not None else ""
         try:
-            log = journal_client.call_tool("get_log", {"task_id": ctx.task_id})
+            log = journal_client.call_tool("get_log", {"task_id": task_id})
             print(f"\n{log}\n")
         except Exception as exc:
             print(f"Ошибка получения журнала: {exc}")
