@@ -28,6 +28,10 @@ class ResearchContext:
     # Дедупликация URL между раундами поиска
     seen_urls: set = field(default_factory=set)
 
+    # Сниппеты поисковой выдачи: url → {title, snippet}
+    # Используются как запасной контент, если страница не удалась
+    search_snippets: dict = field(default_factory=dict)
+
     # Ссылки из первого и второго раундов
     initial_links: list = field(default_factory=list)
     deep_links: list = field(default_factory=list)

@@ -197,7 +197,11 @@ class ResearchOrchestrator:
     # -----------------------------------------------------------------------
 
     def _search(self, queries: list[str]) -> list[str]:
-        """Вызывает search_server для каждого запроса, собирает URL (дедупликация)."""
+        """Вызывает search_server для каждого запроса, собирает URL (дедупликация).
+
+        Сохраняет сниппеты в context.search_snippets как резервный контент на случай,
+        если страница не сможет быть скачана скрапером.
+        """
         all_links: list[str] = []
         for q in queries:
             try:
@@ -212,6 +216,12 @@ class ResearchOrchestrator:
                     if url and url not in self.context.seen_urls:
                         self.context.seen_urls.add(url)
                         all_links.append(url)
+                        # Сохраняем сниппет для использования как запасного контента
+                        if isinstance(item, dict):
+                            self.context.search_snippets[url] = {
+                                "title": item.get("title", ""),
+                                "snippet": item.get("snippet", ""),
+                            }
             except Exception as exc:
                 self._print(f"  search exception: {exc}")
 
@@ -219,17 +229,58 @@ class ResearchOrchestrator:
         return all_links[:self.MAX_LINKS_PER_ROUND]
 
     def _fetch(self, urls: list[str]) -> list[dict]:
-        """Вызывает scraper_server для списка URL, возвращает успешные документы."""
+        """Вызывает scraper_server для списка URL, возвращает документы.
+
+        Если скачать страницу не удалось, подставляет сниппет из поискового результата
+        как запасной контент — это позволяет LLM работать с данными даже при недоступных URL.
+        """
         if not urls:
             return []
         try:
             raw = self.scraper.call_tool("fetch_urls", {"urls": urls})
             self._count_call("scraper")
             docs = json.loads(raw)
-            return [d for d in docs if d.get("error") is None and d.get("content")]
         except Exception as exc:
             self._print(f"  fetch exception: {exc}")
-            return []
+            docs = []
+
+        result = []
+        fetched_urls = {d.get("url") for d in docs if isinstance(d, dict)}
+
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            url = doc.get("url", "")
+            if doc.get("error") is None and doc.get("content"):
+                result.append(doc)
+            elif url in self.context.search_snippets:
+                # Страница недоступна — используем сниппет из поиска как запасной контент
+                meta = self.context.search_snippets[url]
+                snippet = meta.get("snippet", "")
+                if snippet:
+                    self._print(f"  fetch fallback to snippet for {url}")
+                    result.append({
+                        "url": url,
+                        "title": meta.get("title", ""),
+                        "content": snippet,
+                        "error": None,
+                    })
+
+        # Добавляем запасные документы для URL, которые scraper вообще не вернул
+        for url in urls:
+            if url not in fetched_urls and url in self.context.search_snippets:
+                meta = self.context.search_snippets[url]
+                snippet = meta.get("snippet", "")
+                if snippet:
+                    self._print(f"  fetch fallback to snippet for {url} (not fetched)")
+                    result.append({
+                        "url": url,
+                        "title": meta.get("title", ""),
+                        "content": snippet,
+                        "error": None,
+                    })
+
+        return result
 
     def _agent_plan_search(self, task: str) -> list[str]:
         """LLM формирует 2-4 поисковых запроса по задаче."""
@@ -267,9 +318,9 @@ class ResearchOrchestrator:
         prompt = (
             f"Задача пользователя: \"{task}\"\n\n"
             f"Вот собранные материалы:\n\n{texts}\n\n"
-            f"Сделай структурированную суммаризацию на русском языке.\n"
-            f"Выдели ключевые сущности (фильмы, места, даты, цены).\n"
-            f"Укажи, какой информации не хватает для полного ответа."
+            f"Выдели из материалов конкретные мероприятия: название, место, дата, время, цена.\n"
+            f"Составь структурированный список найденных событий.\n"
+            f"Укажи, какой информации не хватает."
         )
         return self.llm(prompt)
 
@@ -288,10 +339,12 @@ class ResearchOrchestrator:
             f"Задача пользователя: \"{task}\"\n\n"
             f"Первичный анализ:\n{summary_v1}\n\n"
             f"Дополнительные данные:\n{deep_texts}\n\n"
-            f"Сформируй финальный ответ для пользователя на русском языке:\n"
-            f"- Рекомендации (2-4 варианта) с кратким обоснованием\n"
-            f"- Практическая информация (где, когда, цены если есть)\n"
-            f"Формат: Markdown, кратко и по делу."
+            f"Сформируй финальный ответ для пользователя на русском языке.\n\n"
+            f"ВАЖНЫЕ ПРАВИЛА:\n"
+            f"1. Перечисли КОНКРЕТНЫЕ мероприятия, найденные в данных выше (название, место, время, цена).\n"
+            f"2. НЕ пиши общие советы о том, где искать концерты — только конкретные найденные варианты.\n"
+            f"3. Если данных недостаточно — честно скажи об этом и перечисли, что удалось найти.\n"
+            f"4. Формат: Markdown, кратко. Каждое мероприятие — отдельный пункт с деталями."
         )
         return self.llm(prompt)
 
