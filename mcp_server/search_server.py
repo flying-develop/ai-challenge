@@ -73,14 +73,14 @@ def _yandex_search(query: str, limit: int) -> list[dict]:
 
     groups = min(limit, _MAX_RESULTS)
     body = {
-        "folderId": folder_id,
-        "searchQuery": {
-            "searchType": "SEARCH_TYPE_RU",
-            "queryText": query,
+        "folder_id": folder_id,
+        "query": {
+            "search_type": "SEARCH_TYPE_RU",
+            "query_text": query,
         },
-        "sortSpec": {"sortMode": "SORT_MODE_BY_RELEVANCE"},
-        "groupSpec": {"groupsOnPage": groups},
-        "maxPassages": 2,
+        "sort_spec": {"sort_mode": "SORT_MODE_BY_RELEVANCE"},
+        "group_spec": {"groups_on_page": groups},
+        "max_passages": 2,
     }
 
     req = urllib.request.Request(
