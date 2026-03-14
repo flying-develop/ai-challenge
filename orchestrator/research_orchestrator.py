@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from typing import Callable
 
 from orchestrator.research_context import ResearchContext
@@ -43,6 +44,13 @@ from orchestrator.research_states import ResearchState, VALID_TRANSITIONS
 # ---------------------------------------------------------------------------
 # ResearchOrchestrator
 # ---------------------------------------------------------------------------
+
+def _current_date_str() -> str:
+    """Возвращает текущую дату в формате 'ДД.ММ.ГГГГ (день недели)'."""
+    now = datetime.now()
+    days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    return f"{now.strftime('%d.%m.%Y')} ({days[now.weekday()]})"
+
 
 class ResearchOrchestrator:
     """
@@ -285,8 +293,10 @@ class ResearchOrchestrator:
         """LLM формирует 2-4 поисковых запроса по задаче."""
         max_q = int(os.environ.get("RESEARCH_MAX_SEARCH_QUERIES", "4"))
         prompt = (
+            f"Сегодня {_current_date_str()}.\n\n"
             f"Задача пользователя: \"{task}\"\n\n"
             f"Сформируй {min(max_q, 4)} поисковых запроса для сбора информации.\n"
+            f"Используй актуальный год и месяц в запросах где это важно.\n"
             f"Верни только список запросов, по одному на строку, без нумерации, "
             f"без пояснений."
         )
@@ -297,9 +307,11 @@ class ResearchOrchestrator:
     def _agent_plan_deep_search(self, summary: str) -> list[str]:
         """LLM формирует уточняющие запросы по результатам первого прохода."""
         prompt = (
+            f"Сегодня {_current_date_str()}.\n\n"
             f"Вот первичная суммаризация результатов исследования:\n{summary}\n\n"
             f"Какие данные стоит дособрать? Сформируй 2-3 уточняющих поисковых запроса "
             f"для получения отзывов, конкретных фактов, деталей.\n"
+            f"Используй актуальный год и месяц в запросах где это важно.\n"
             f"Верни только список запросов, по одному на строку, без нумерации."
         )
         response = self.llm(prompt)
@@ -315,6 +327,7 @@ class ResearchOrchestrator:
             for d in documents[:8]
         )
         prompt = (
+            f"Сегодня {_current_date_str()}.\n\n"
             f"Задача пользователя: \"{task}\"\n\n"
             f"Вот собранные материалы:\n\n{texts}\n\n"
             f"Проанализируй материалы применительно к задаче пользователя.\n"
@@ -335,6 +348,7 @@ class ResearchOrchestrator:
             deep_texts = "Дополнительных данных нет."
 
         prompt = (
+            f"Сегодня {_current_date_str()}.\n\n"
             f"Задача пользователя: \"{task}\"\n\n"
             f"Первичный анализ:\n{summary_v1}\n\n"
             f"Дополнительные данные:\n{deep_texts}\n\n"
