@@ -46,13 +46,56 @@ mcp = FastMCP("Search Server")
 # Жёсткий лимит: не более 10 результатов
 _MAX_RESULTS = 10
 
-# Синхронный REST-эндпоинт Yandex Cloud Search API v2
-_SEARCH_ENDPOINT = "https://searchapi.api.cloud.yandex.net/v2/web/search"
+# Эндпоинты
+_YANDEX_ENDPOINT = "https://searchapi.api.cloud.yandex.net/v2/web/search"
+_BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
 # ---------------------------------------------------------------------------
 # Yandex Cloud Search API v2 (синхронный, REST, Api-Key)
 # ---------------------------------------------------------------------------
+
+def _brave_search(query: str, limit: int) -> list[dict]:
+    """Поиск через Brave Search API (GET, X-Subscription-Token)."""
+    api_key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "BRAVE_API_KEY не задан в .env. "
+            "Получите ключ: https://api-dashboard.search.brave.com/"
+        )
+
+    params = urllib.parse.urlencode({
+        "q": query,
+        "count": min(limit, _MAX_RESULTS),
+        "search_lang": "ru",
+        "country": "ru",
+    })
+    req = urllib.request.Request(
+        f"{_BRAVE_ENDPOINT}?{params}",
+        headers={
+            "Accept": "application/json",
+            "X-Subscription-Token": api_key,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_err = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Brave Search API {exc.code}: {body_err}") from exc
+
+    results = []
+    for item in data.get("web", {}).get("results", []):
+        url = item.get("url", "")
+        if url:
+            results.append({
+                "title": item.get("title", ""),
+                "url": url,
+                "snippet": item.get("description", ""),
+            })
+    return results
+
 
 def _yandex_search(query: str, limit: int) -> list[dict]:
     """Поиск через Yandex Cloud Search API v2 (синхронный POST, Api-Key)."""
@@ -84,7 +127,7 @@ def _yandex_search(query: str, limit: int) -> list[dict]:
     }
 
     req = urllib.request.Request(
-        _SEARCH_ENDPOINT,
+        _YANDEX_ENDPOINT,
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Authorization": f"Api-Key {api_key}",
@@ -187,8 +230,9 @@ def search_web(query: str, limit: int = 10) -> str:
     Поиск ссылок в Яндексе по запросу.
 
     Режим определяется переменной SEARCH_MODE в .env:
-      yandex_cloud — реальный поиск через Yandex Cloud Search API v2 (синхронный)
-      mock          — воспроизводимая заглушка (по умолчанию)
+      brave        — Brave Search API (BRAVE_API_KEY)
+      yandex_cloud — Yandex Cloud Search API v2 (YANDEX_API_KEY + YANDEX_CLOUD_FOLDER_ID)
+      mock         — воспроизводимая заглушка (по умолчанию)
 
     Args:
         query: Поисковый запрос на естественном языке
@@ -202,7 +246,9 @@ def search_web(query: str, limit: int = 10) -> str:
     mode = os.environ.get("SEARCH_MODE", "mock").strip().lower()
 
     try:
-        if mode == "yandex_cloud":
+        if mode == "brave":
+            results = _brave_search(query, limit)
+        elif mode == "yandex_cloud":
             results = _yandex_search(query, limit)
         else:
             results = _mock_search(query, limit)
