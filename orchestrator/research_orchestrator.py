@@ -147,9 +147,8 @@ class ResearchOrchestrator:
             self._notify(ResearchState.SEARCH_DEEP.progress_message)
             deep_queries = self._agent_plan_deep_search(summary_v1)
             self._print(f"[SEARCH_DEEP] Уточняющие запросы: {deep_queries}")
-            all_deep = self._search(deep_queries)
-            # Инвариант: дедупликация — убираем ссылки из первого прохода
-            deep_links = [l for l in all_deep if l not in self.context.seen_urls]
+            # _search() сам дедуплицирует через seen_urls — результат уже без повторов
+            deep_links = self._search(deep_queries)
             self.context.deep_links = deep_links
             self._print(f"[SEARCH_DEEP] Найдено {len(deep_links)} новых ссылок")
             self._log(ResearchState.SEARCH_DEEP, "complete", f"{len(deep_links)} новых ссылок")
