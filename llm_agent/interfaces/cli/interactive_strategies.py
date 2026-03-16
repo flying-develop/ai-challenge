@@ -229,6 +229,17 @@ MCP (Model Context Protocol):
   (Требует: LLM-ключ в .env; SEARCH_MODE=mock работает без ключей Яндекса)
   (Telegram: задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID в .env)
 
+RAG-ПОИСК (документы podkop-wiki):
+  /rag search "<запрос>"  — найти релевантные чанки из индекса
+    Пример: /rag search "как установить podkop"
+  /rag search "<запрос>" --strategy fixed_500  — поиск по конкретной стратегии
+  /rag search "<запрос>" --top_k 10            — вернуть 10 результатов
+  /rag stats               — статистика индекса (все стратегии)
+  /rag stats fixed_500     — статистика по стратегии
+  /rag compare             — ASCII-таблица сравнения стратегий
+  (Требует: pre-built индекс; задайте RAG_DB_PATH в .env или ./output/index.db)
+  (Эмбеддинги: DASHSCOPE_API_KEY для Qwen, иначе LocalRandomEmbedder)
+
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
   /help                  — эта справка
@@ -923,6 +934,167 @@ def _print_journal_fallback(mcp_state: dict, task_id: str) -> None:
         print(f"\n{log}\n")
     except Exception as exc:
         print(f"Ошибка получения журнала: {exc}")
+
+
+def _handle_rag_command(parts: list[str]) -> None:
+    """Обработать /rag [search | stats | compare].
+
+    Субкоманды:
+        /rag search "<запрос>" [--strategy NAME] [--top_k N]
+        /rag stats [strategy_name]
+        /rag compare
+    """
+    import os
+    import sys as _sys
+
+    # Определить путь к БД
+    db_path_str = os.environ.get("RAG_DB_PATH", "")
+    if not db_path_str:
+        # Ищем относительно корня проекта
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        ))))
+        db_path_str = os.path.join(_project_root, "rag_indexer", "output", "index.db")
+
+    # Проверить наличие rag_indexer
+    _rag_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)
+    )))), "rag_indexer")
+
+    if _rag_dir not in _sys.path:
+        _sys.path.insert(0, _rag_dir)
+
+    try:
+        from src.embedding.provider import EmbeddingProvider
+        from src.storage.index_store import IndexStore
+        from src.pipeline import IndexingPipeline
+    except ImportError:
+        print("❌ RAG-модуль не найден.")
+        print("   Убедитесь что директория rag_indexer/ находится в корне проекта.")
+        return
+
+    args = parts[1:]
+    sub = args[0].lower() if args else ""
+
+    # ---- /rag search ----
+    if sub == "search":
+        query_parts = []
+        strategy_filter = None
+        top_k = 5
+        i = 1
+        while i < len(args):
+            if args[i] == "--strategy" and i + 1 < len(args):
+                strategy_filter = args[i + 1]
+                i += 2
+            elif args[i] == "--top_k" and i + 1 < len(args):
+                try:
+                    top_k = int(args[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                query_parts.append(args[i])
+                i += 1
+
+        query = " ".join(query_parts).strip().strip('"').strip("'")
+        if not query:
+            print("Использование: /rag search \"<запрос>\" [--strategy NAME] [--top_k N]")
+            return
+
+        import os as _os
+        if not _os.path.exists(db_path_str):
+            print(f"❌ Индекс не найден: {db_path_str}")
+            print("   Запустите: python rag_indexer/main.py index --docs <path> --db <path>")
+            return
+
+        print(f"\n[RAG] Запрос: «{query}»")
+        if strategy_filter:
+            print(f"[RAG] Стратегия: {strategy_filter}")
+        print(f"[RAG] Top-{top_k}")
+
+        try:
+            provider = EmbeddingProvider.create("qwen")
+            query_vectors = provider.embed_texts([query])
+            query_vector = query_vectors[0]
+        except Exception as exc:
+            print(f"❌ Ошибка генерации эмбеддинга: {exc}", file=_sys.stderr)
+            return
+
+        try:
+            with IndexStore(db_path_str) as store:
+                results = store.search(query_vector, strategy=strategy_filter, top_k=top_k)
+        except Exception as exc:
+            print(f"❌ Ошибка поиска: {exc}", file=_sys.stderr)
+            return
+
+        if not results:
+            print("[INFO] Результатов не найдено.")
+            return
+
+        print(f"\nНайдено {len(results)} результатов:\n" + "─" * 60)
+        for res in results:
+            c = res.chunk
+            print(f"[{res.rank}] score={res.score:.4f} | {c.strategy} | {c.source}")
+            print(f"    Раздел : {c.section or '(нет)'}")
+            print(f"    Токенов: {c.token_count}")
+            preview = c.text[:250].replace("\n", " ")
+            if len(c.text) > 250:
+                preview += "..."
+            print(f"    Текст  : {preview}")
+            print("─" * 60)
+        return
+
+    # ---- /rag stats ----
+    if sub == "stats":
+        strategy_filter = args[1] if len(args) > 1 else None
+        import os as _os
+        if not _os.path.exists(db_path_str):
+            print(f"❌ Индекс не найден: {db_path_str}")
+            return
+        try:
+            with IndexStore(db_path_str) as store:
+                if strategy_filter:
+                    stats = store.get_stats(strategy_filter)
+                    all_stats = {strategy_filter: stats}
+                else:
+                    strategies = store.get_all_strategies()
+                    all_stats = {s: store.get_stats(s) for s in strategies}
+        except Exception as exc:
+            print(f"❌ Ошибка чтения индекса: {exc}", file=_sys.stderr)
+            return
+
+        if not all_stats:
+            print("[INFO] Индекс пуст.")
+            return
+
+        from src.pipeline import _print_comparison_table
+        _print_comparison_table(all_stats)
+        return
+
+    # ---- /rag compare ----
+    if sub == "compare":
+        import os as _os
+        if not _os.path.exists(db_path_str):
+            print(f"❌ Индекс не найден: {db_path_str}")
+            return
+        try:
+            provider = EmbeddingProvider.create("local")
+            pipeline = IndexingPipeline(docs_path=".", db_path=db_path_str, embedding_provider=provider)
+            pipeline.compare_strategies()
+        except Exception as exc:
+            print(f"❌ Ошибка: {exc}", file=_sys.stderr)
+        return
+
+    # ---- Помощь ----
+    print("Использование:")
+    print('  /rag search "<запрос>"              — поиск по индексу')
+    print('  /rag search "<запрос>" --strategy fixed_500')
+    print('  /rag search "<запрос>" --top_k 10')
+    print('  /rag stats                           — статистика всех стратегий')
+    print('  /rag stats fixed_500                 — статистика стратегии')
+    print('  /rag compare                         — ASCII-таблица сравнения')
+    print(f'\n  БД: {db_path_str}')
+    print('  Задайте RAG_DB_PATH в .env для кастомного пути.')
 
 
 def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
@@ -1679,6 +1851,11 @@ def handle_command(
             print("MCP не настроен.")
             return current_strategy_num, True
         _handle_research_command(parts, mcp_state)
+        return current_strategy_num, True
+
+    # ---- RAG-поиск ----
+    if command == "/rag":
+        _handle_rag_command(parts)
         return current_strategy_num, True
 
     # ---- Общие ----

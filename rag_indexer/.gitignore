@@ -1,0 +1,6 @@
+output/*.db
+output/*.db-wal
+output/*.db-shm
+__pycache__/
+*.pyc
+.env
