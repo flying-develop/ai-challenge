@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+import ssl
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -120,11 +121,14 @@ class QwenEmbedder(EmbeddingProvider):
         self,
         api_key: str,
         dimension: int = 1024,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
     ) -> None:
         self._api_key = api_key
         self._dimension = dimension
         self._timeout = timeout
+        # SSL-контекст с явным указанием TLS 1.2+ для совместимости
+        self._ssl_ctx = ssl.create_default_context()
+        self._ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
     @property
     def model_name(self) -> str:
@@ -159,18 +163,34 @@ class QwenEmbedder(EmbeddingProvider):
         return all_embeddings
 
     def _embed_batch_with_retry(self, batch: list[str]) -> list[list[float]]:
-        """Отправить батч с retry-логикой."""
+        """Отправить батч с retry-логикой (экспоненциальная задержка).
+
+        SSL EOF (_ssl.c EOF occurred) и сетевые ошибки — ретраятся.
+        HTTP-ошибки (4xx/5xx) — ретраятся только если 5xx.
+        """
         delay = 1.0
         last_error: Exception | None = None
 
         for attempt in range(self._MAX_RETRIES):
             try:
                 return self._embed_batch(batch)
-            except (urllib.error.URLError, RuntimeError) as exc:
+            except RuntimeError as exc:
+                # HTTP 4xx — не ретраим, сразу пробрасываем
+                msg = str(exc)
+                if "DashScope HTTP 4" in msg:
+                    raise
                 last_error = exc
-                if attempt < self._MAX_RETRIES - 1:
-                    time.sleep(delay)
-                    delay *= 2
+            except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+                last_error = exc
+
+            if attempt < self._MAX_RETRIES - 1:
+                print(
+                    f"    [retry {attempt + 1}/{self._MAX_RETRIES - 1}] "
+                    f"{type(last_error).__name__}: {last_error} — ожидание {delay:.0f}с...",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                delay *= 2
 
         raise RuntimeError(
             f"DashScope API недоступен после {self._MAX_RETRIES} попыток: {last_error}"
@@ -204,7 +224,7 @@ class QwenEmbedder(EmbeddingProvider):
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout, context=self._ssl_ctx) as resp:
                 body = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
