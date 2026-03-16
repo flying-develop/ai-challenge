@@ -99,7 +99,7 @@ class EmbeddingProvider(ABC):
 class QwenEmbedder(EmbeddingProvider):
     """Провайдер эмбеддингов через DashScope API (Qwen text-embedding-v3).
 
-    Endpoint: POST https://dashscope.aliyuncs.com/api/v1/services/embeddings/
+    Endpoint: POST https://dashscope-intl.aliyuncs.com/api/v1/services/embeddings/
               text-embedding/text-embedding
     Батч: до 25 текстов за запрос.
     Retry: 3 попытки с экспоненциальной задержкой (1s, 2s, 4s).
@@ -111,10 +111,10 @@ class QwenEmbedder(EmbeddingProvider):
     """
 
     _ENDPOINT = (
-        "https://dashscope.aliyuncs.com/api/v1/services/embeddings/"
+        "https://dashscope-intl.aliyuncs.com/api/v1/services/embeddings/"
         "text-embedding/text-embedding"
     )
-    _BATCH_SIZE = 25
+    _BATCH_SIZE = 10
     _MAX_RETRIES = 3
 
     def __init__(
