@@ -1,0 +1,266 @@
+"""MCP-сервер: поиск ссылок по запросу.
+
+Образовательная концепция: агент формирует поисковый запрос (мозг),
+search_server выполняет реальный поиск в Яндексе (руки).
+LLM решает ЧТО искать, сервер выполняет КАК.
+
+Два режима (SEARCH_MODE в .env):
+  yandex_cloud — реальный поиск через Yandex Cloud Search API v2 (REST, синхронный)
+  mock          — воспроизводимая заглушка из search_mock_data.json
+
+Аутентификация (SEARCH_MODE=yandex_cloud):
+  YANDEX_API_KEY       — API-ключ сервисного аккаунта (Authorization: Api-Key <key>)
+  YANDEX_CLOUD_FOLDER_ID — идентификатор каталога Yandex Cloud
+
+Запуск:
+    python -m mcp_server.search_server
+
+Инструменты:
+    search_web — поиск по запросу, возвращает JSON-список ссылок
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ---------------------------------------------------------------------------
+# Инициализация
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP("Search Server")
+
+# Жёсткий лимит: не более 10 результатов
+_MAX_RESULTS = 10
+
+# Эндпоинты
+_YANDEX_ENDPOINT = "https://searchapi.api.cloud.yandex.net/v2/web/search"
+_BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+
+
+# ---------------------------------------------------------------------------
+# Yandex Cloud Search API v2 (синхронный, REST, Api-Key)
+# ---------------------------------------------------------------------------
+
+def _brave_search(query: str, limit: int) -> list[dict]:
+    """Поиск через Brave Search API (GET, X-Subscription-Token)."""
+    api_key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "BRAVE_API_KEY не задан в .env. "
+            "Получите ключ: https://api-dashboard.search.brave.com/"
+        )
+
+    params = urllib.parse.urlencode({
+        "q": query,
+        "count": min(limit, _MAX_RESULTS),
+        "search_lang": "ru",
+        "country": "ru",
+    })
+    req = urllib.request.Request(
+        f"{_BRAVE_ENDPOINT}?{params}",
+        headers={
+            "Accept": "application/json",
+            "X-Subscription-Token": api_key,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_err = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Brave Search API {exc.code}: {body_err}") from exc
+
+    results = []
+    for item in data.get("web", {}).get("results", []):
+        url = item.get("url", "")
+        if url:
+            results.append({
+                "title": item.get("title", ""),
+                "url": url,
+                "snippet": item.get("description", ""),
+            })
+    return results
+
+
+def _yandex_search(query: str, limit: int) -> list[dict]:
+    """Поиск через Yandex Cloud Search API v2 (синхронный POST, Api-Key)."""
+    api_key = os.environ.get("YANDEX_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError(
+            "YANDEX_API_KEY не задан в .env. "
+            "Создайте API-ключ сервисного аккаунта: "
+            "https://yandex.cloud/en/docs/iam/concepts/authorization/api-key"
+        )
+
+    folder_id = os.environ.get("YANDEX_CLOUD_FOLDER_ID", "").strip()
+    if not folder_id:
+        raise ValueError(
+            "YANDEX_CLOUD_FOLDER_ID не задан в .env. "
+            "Получите: https://yandex.cloud/en-ru/docs/resource-manager/operations/folder/get-id"
+        )
+
+    groups = min(limit, _MAX_RESULTS)
+    body = {
+        "folder_id": folder_id,
+        "query": {
+            "search_type": "SEARCH_TYPE_RU",
+            "query_text": query,
+        },
+        "sort_spec": {"sort_mode": "SORT_MODE_BY_RELEVANCE"},
+        "group_spec": {"groups_on_page": groups},
+        "max_passages": 2,
+    }
+
+    req = urllib.request.Request(
+        _YANDEX_ENDPOINT,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Api-Key {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_err = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Yandex Search API {exc.code}: {body_err}") from exc
+
+    raw_data = result.get("rawData", "")
+    if not raw_data:
+        return []
+
+    import base64
+    try:
+        xml_bytes = base64.b64decode(raw_data)
+        xml_text = xml_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        xml_text = raw_data
+
+    return _parse_yandex_xml(xml_text)
+
+
+def _parse_yandex_xml(xml_text: str) -> list[dict]:
+    """Парсим XML-ответ Yandex Search API."""
+    results: list[dict] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return results
+
+    # <group><doc><url>...</url><title>...</title><headline>...</headline></doc></group>
+    for group in root.iter("group"):
+        for doc in group.iter("doc"):
+            url_el = doc.find("url")
+            title_el = doc.find("title")
+            headline_el = doc.find("headline")
+
+            url = url_el.text.strip() if url_el is not None and url_el.text else ""
+            title = _strip_xml_tags(
+                ET.tostring(title_el, encoding="unicode") if title_el is not None else ""
+            )
+            snippet = _strip_xml_tags(
+                ET.tostring(headline_el, encoding="unicode") if headline_el is not None else ""
+            )
+            if url:
+                results.append({"title": title, "url": url, "snippet": snippet})
+
+    return results
+
+
+def _strip_xml_tags(xml_str: str) -> str:
+    """Убрать XML-теги, оставить только текст."""
+    try:
+        root = ET.fromstring(f"<x>{xml_str}</x>")
+        return "".join(root.itertext()).strip()
+    except ET.ParseError:
+        import re
+        return re.sub(r"<[^>]+>", "", xml_str).strip()
+
+
+# ---------------------------------------------------------------------------
+# Mock-режим
+# ---------------------------------------------------------------------------
+
+def _mock_search(query: str, limit: int) -> list[dict]:
+    """Поиск-заглушка: возвращает данные из search_mock_data.json."""
+    mock_path = Path(__file__).parent / "search_mock_data.json"
+    if not mock_path.exists():
+        return [
+            {
+                "title": f"Результат {i+1} по запросу «{query}»",
+                "url": f"https://example.com/result-{i+1}",
+                "snippet": f"Синтетический сниппет {i+1} для демонстрации работы поиска.",
+            }
+            for i in range(min(limit, _MAX_RESULTS))
+        ]
+
+    try:
+        data = json.loads(mock_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    results = data.get("results", data if isinstance(data, list) else [])
+    return results[:min(limit, _MAX_RESULTS)]
+
+
+# ---------------------------------------------------------------------------
+# Инструмент: search_web
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def search_web(query: str, limit: int = 10) -> str:
+    """
+    Поиск ссылок в Яндексе по запросу.
+
+    Режим определяется переменной SEARCH_MODE в .env:
+      brave        — Brave Search API (BRAVE_API_KEY)
+      yandex_cloud — Yandex Cloud Search API v2 (YANDEX_API_KEY + YANDEX_CLOUD_FOLDER_ID)
+      mock         — воспроизводимая заглушка (по умолчанию)
+
+    Args:
+        query: Поисковый запрос на естественном языке
+        limit: Максимум результатов (1-10, по умолчанию 10)
+
+    Returns:
+        JSON: [{"title": "...", "url": "...", "snippet": "..."}, ...]
+    """
+    limit = max(1, min(limit, _MAX_RESULTS))
+
+    mode = os.environ.get("SEARCH_MODE", "mock").strip().lower()
+
+    try:
+        if mode == "brave":
+            results = _brave_search(query, limit)
+        elif mode == "yandex_cloud":
+            results = _yandex_search(query, limit)
+        else:
+            results = _mock_search(query, limit)
+    except (ValueError, RuntimeError, ConnectionError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    return json.dumps(results[:limit], ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Точка входа
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    mcp.run()
