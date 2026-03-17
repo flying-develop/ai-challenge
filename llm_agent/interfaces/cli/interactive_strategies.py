@@ -954,7 +954,7 @@ def _init_rag_retrievers(rag_state: dict) -> str:
         return f"Файл индекса не найден: {db_path}"
 
     # Add rag_indexer to sys.path
-    rag_root = os.path.normpath(os.path.join(os.path.dirname(db_path), "..", ".."))
+    rag_root = os.path.normpath(os.path.join(os.path.dirname(db_path), ".."))
     if rag_root not in sys.path:
         sys.path.insert(0, rag_root)
 
