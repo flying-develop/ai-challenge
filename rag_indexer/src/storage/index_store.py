@@ -319,6 +319,31 @@ class IndexStore:
         ).fetchall()
         return [r["strategy"] for r in rows]
 
+    def get_all_chunks(self, strategy: Optional[str] = None) -> list[Chunk]:
+        """Загрузить все чанки из индекса (без эмбеддингов)."""
+        if strategy:
+            rows = self._conn.execute(
+                """SELECT chunk_id, text, source, file, section, doc_title,
+                          chunk_index, token_count, strategy, metadata
+                   FROM chunks WHERE strategy = ? ORDER BY source, chunk_index""",
+                (strategy,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT chunk_id, text, source, file, section, doc_title,
+                          chunk_index, token_count, strategy, metadata
+                   FROM chunks ORDER BY source, chunk_index""",
+            ).fetchall()
+        return [
+            Chunk(
+                chunk_id=row["chunk_id"], text=row["text"], source=row["source"],
+                file=row["file"], section=row["section"], doc_title=row["doc_title"],
+                chunk_index=row["chunk_index"], token_count=row["token_count"],
+                strategy=row["strategy"], metadata=json.loads(row["metadata"] or "{}"),
+            )
+            for row in rows
+        ]
+
     # ---------------------------------------------------------------------------
     # Управление данными
     # ---------------------------------------------------------------------------
