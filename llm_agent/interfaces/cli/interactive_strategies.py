@@ -936,48 +936,164 @@ def _print_journal_fallback(mcp_state: dict, task_id: str) -> None:
         print(f"Ошибка получения журнала: {exc}")
 
 
-def _handle_rag_command(parts: list[str]) -> None:
-    """Обработать /rag [search | stats | compare].
-
-    Субкоманды:
-        /rag search "<запрос>" [--strategy NAME] [--top_k N]
-        /rag stats [strategy_name]
-        /rag compare
-    """
+def _get_rag_indexer_path() -> str:
     import os
-    import sys as _sys
+    return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "rag_indexer"))
 
-    # Определить путь к БД
-    db_path_str = os.environ.get("RAG_DB_PATH", "")
-    if not db_path_str:
-        # Ищем относительно корня проекта
-        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)
-        ))))
-        db_path_str = os.path.join(_project_root, "rag_indexer", "output", "index.db")
 
-    # Проверить наличие rag_indexer
-    _rag_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)
-    )))), "rag_indexer")
+def _init_rag_retrievers(rag_state: dict) -> str:
+    """Lazy init of IndexStore, embedder, and retrievers. Returns error msg or empty str."""
+    import os
+    import sys
 
-    if _rag_dir not in _sys.path:
-        _sys.path.insert(0, _rag_dir)
+    if rag_state.get("store") is not None:
+        return ""
+
+    db_path = rag_state.get("db_path", "")
+    if not os.path.exists(db_path):
+        return f"Файл индекса не найден: {db_path}"
+
+    # Add rag_indexer to sys.path
+    rag_root = os.path.normpath(os.path.join(os.path.dirname(db_path), ".."))
+    if rag_root not in sys.path:
+        sys.path.insert(0, rag_root)
 
     try:
-        from src.embedding.provider import EmbeddingProvider
         from src.storage.index_store import IndexStore
-        from src.pipeline import IndexingPipeline
+        from src.embedding.provider import EmbeddingProvider
+        from src.retrieval.retriever import VectorRetriever, BM25Retriever, HybridRetriever
+    except ImportError as e:
+        return f"Ошибка импорта RAG модулей: {e}"
+
+    try:
+        store = IndexStore(db_path)
+        embedder = EmbeddingProvider.create("qwen")
+        strategy_filter = rag_state.get("strategy_filter")
+
+        vector_ret = VectorRetriever(store, embedder, strategy_filter)
+        bm25_ret = BM25Retriever(store, strategy_filter)
+        hybrid_ret = HybridRetriever(vector_ret, bm25_ret)
+
+        rag_state["store"] = store
+        rag_state["embedder"] = embedder
+        rag_state["retrievers"] = {
+            "vector": vector_ret,
+            "bm25": bm25_ret,
+            "hybrid": hybrid_ret,
+        }
+        return ""
+    except Exception as e:
+        return f"Ошибка инициализации RAG: {e}"
+
+
+def _run_rag_query(query: str, rag_state: dict, agent) -> str:
+    """Run a RAG query and return the answer."""
+    import os
+    import sys
+    mode = rag_state.get("mode", "off")
+    retriever = rag_state["retrievers"].get(mode)
+    if not retriever:
+        return agent.ask(query)
+
+    try:
+        from src.retrieval.rag_query import RAGQueryBuilder
     except ImportError:
-        print("❌ RAG-модуль не найден.")
-        print("   Убедитесь что директория rag_indexer/ находится в корне проекта.")
-        return
+        try:
+            rag_root = os.path.normpath(os.path.join(os.path.dirname(rag_state["db_path"]), "..", ".."))
+            if rag_root not in sys.path:
+                sys.path.insert(0, rag_root)
+            from src.retrieval.rag_query import RAGQueryBuilder
+        except ImportError:
+            return agent.ask(query)
 
-    args = parts[1:]
-    sub = args[0].lower() if args else ""
+    results = retriever.search(query, top_k=rag_state["top_k"])
+    if not results:
+        return agent.ask(query)
 
-    # ---- /rag search ----
-    if sub == "search":
+    ctx = RAGQueryBuilder().build(query, results)
+    reply = agent.ask(ctx.user_prompt)
+
+    print("\nИсточники:")
+    seen = set()
+    for r in results:
+        if r.source not in seen:
+            print(f"  - {r.source} ({r.section or 'нет раздела'})")
+            seen.add(r.source)
+
+    return reply
+
+
+def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
+    """Handle /rag subcommands."""
+    import os
+    sub = parts[1] if len(parts) > 1 else "status"
+
+    if sub == "off":
+        rag_state["mode"] = "off"
+        return "RAG отключён."
+
+    elif sub in ("vector", "hybrid", "bm25"):
+        msg = _init_rag_retrievers(rag_state)
+        if msg:
+            return msg
+        rag_state["mode"] = sub
+        return f"RAG режим: {sub}"
+
+    elif sub == "status":
+        mode = rag_state.get("mode", "off")
+        db_path = rag_state.get("db_path", "?")
+        strategy = rag_state.get("strategy_filter") or "все стратегии"
+        top_k = rag_state.get("top_k", 5)
+        store = rag_state.get("store")
+        chunks_info = ""
+        if store:
+            try:
+                stats = store.get_stats()
+                chunks_info = f", чанков: {stats.get('chunks', '?')}"
+            except Exception:
+                pass
+        return (
+            f"RAG статус:\n"
+            f"  режим: {mode}\n"
+            f"  db: {db_path}\n"
+            f"  стратегия: {strategy}\n"
+            f"  top_k: {top_k}{chunks_info}"
+        )
+
+    elif sub == "eval":
+        msg = _init_rag_retrievers(rag_state)
+        if msg:
+            return msg
+        import sys
+        rag_root = os.path.normpath(os.path.join(os.path.dirname(rag_state["db_path"]), "..", ".."))
+        if rag_root not in sys.path:
+            sys.path.insert(0, rag_root)
+        try:
+            from src.retrieval.evaluator import RAGEvaluator
+            from src.retrieval.rag_query import RAGQueryBuilder
+        except ImportError as e:
+            return f"Ошибка импорта evaluator: {e}"
+        retrievers = list(rag_state["retrievers"].values())
+        evaluator = RAGEvaluator(retrievers, llm_fn=None, top_k=rag_state["top_k"])
+        results = evaluator.run()
+        evaluator.print_report(results)
+        return "Оценка завершена."
+
+    elif sub == "search":
+        # Legacy search subcommand — delegate to old-style inline search
+        import sys as _sys
+        db_path_str = rag_state.get("db_path", "")
+        _rag_dir = _get_rag_indexer_path()
+        if _rag_dir not in _sys.path:
+            _sys.path.insert(0, _rag_dir)
+
+        try:
+            from src.embedding.provider import EmbeddingProvider
+            from src.storage.index_store import IndexStore
+        except ImportError:
+            return "RAG-модуль не найден."
+
+        args = parts[1:]
         query_parts = []
         strategy_filter = None
         top_k = 5
@@ -998,103 +1114,98 @@ def _handle_rag_command(parts: list[str]) -> None:
 
         query = " ".join(query_parts).strip().strip('"').strip("'")
         if not query:
-            print("Использование: /rag search \"<запрос>\" [--strategy NAME] [--top_k N]")
-            return
+            return "Использование: /rag search \"<запрос>\" [--strategy NAME] [--top_k N]"
 
-        import os as _os
-        if not _os.path.exists(db_path_str):
-            print(f"❌ Индекс не найден: {db_path_str}")
-            print("   Запустите: python rag_indexer/main.py index --docs <path> --db <path>")
-            return
-
-        print(f"\n[RAG] Запрос: «{query}»")
-        if strategy_filter:
-            print(f"[RAG] Стратегия: {strategy_filter}")
-        print(f"[RAG] Top-{top_k}")
+        if not os.path.exists(db_path_str):
+            return f"Индекс не найден: {db_path_str}"
 
         try:
             provider = EmbeddingProvider.create("qwen")
-            query_vectors = provider.embed_texts([query])
-            query_vector = query_vectors[0]
+            query_vector = provider.embed_texts([query])[0]
         except Exception as exc:
-            print(f"❌ Ошибка генерации эмбеддинга: {exc}", file=_sys.stderr)
-            return
+            return f"Ошибка генерации эмбеддинга: {exc}"
 
         try:
             with IndexStore(db_path_str) as store:
                 results = store.search(query_vector, strategy=strategy_filter, top_k=top_k)
         except Exception as exc:
-            print(f"❌ Ошибка поиска: {exc}", file=_sys.stderr)
-            return
+            return f"Ошибка поиска: {exc}"
 
         if not results:
-            print("[INFO] Результатов не найдено.")
-            return
+            return "[INFO] Результатов не найдено."
 
-        print(f"\nНайдено {len(results)} результатов:\n" + "─" * 60)
+        lines = [f"\nНайдено {len(results)} результатов:\n" + "─" * 60]
         for res in results:
             c = res.chunk
-            print(f"[{res.rank}] score={res.score:.4f} | {c.strategy} | {c.source}")
-            print(f"    Раздел : {c.section or '(нет)'}")
-            print(f"    Токенов: {c.token_count}")
+            lines.append(f"[{res.rank}] score={res.score:.4f} | {c.strategy} | {c.source}")
+            lines.append(f"    Раздел : {c.section or '(нет)'}")
+            lines.append(f"    Токенов: {c.token_count}")
             preview = c.text[:250].replace("\n", " ")
             if len(c.text) > 250:
                 preview += "..."
-            print(f"    Текст  : {preview}")
-            print("─" * 60)
-        return
+            lines.append(f"    Текст  : {preview}")
+            lines.append("─" * 60)
+        return "\n".join(lines)
 
-    # ---- /rag stats ----
-    if sub == "stats":
-        strategy_filter = args[1] if len(args) > 1 else None
-        import os as _os
-        if not _os.path.exists(db_path_str):
-            print(f"❌ Индекс не найден: {db_path_str}")
-            return
+    elif sub == "stats":
+        import sys as _sys
+        db_path_str = rag_state.get("db_path", "")
+        _rag_dir = _get_rag_indexer_path()
+        if _rag_dir not in _sys.path:
+            _sys.path.insert(0, _rag_dir)
+
+        try:
+            from src.storage.index_store import IndexStore
+        except ImportError:
+            return "RAG-модуль не найден."
+
+        strategy_filter = parts[2] if len(parts) > 2 else None
+        if not os.path.exists(db_path_str):
+            return f"Индекс не найден: {db_path_str}"
         try:
             with IndexStore(db_path_str) as store:
                 if strategy_filter:
                     stats = store.get_stats(strategy_filter)
                     all_stats = {strategy_filter: stats}
                 else:
-                    strategies = store.get_all_strategies()
-                    all_stats = {s: store.get_stats(s) for s in strategies}
+                    strategies_list = store.get_all_strategies()
+                    all_stats = {s: store.get_stats(s) for s in strategies_list}
         except Exception as exc:
-            print(f"❌ Ошибка чтения индекса: {exc}", file=_sys.stderr)
-            return
+            return f"Ошибка чтения индекса: {exc}"
 
         if not all_stats:
-            print("[INFO] Индекс пуст.")
-            return
+            return "[INFO] Индекс пуст."
 
-        from src.pipeline import _print_comparison_table
-        _print_comparison_table(all_stats)
-        return
+        lines = []
+        for strat, st in all_stats.items():
+            lines.append(f"  {strat}: чанков={st['chunks']}, avg_tokens={st['avg_tokens']}, docs={st['documents']}")
+        return "\n".join(lines)
 
-    # ---- /rag compare ----
-    if sub == "compare":
-        import os as _os
-        if not _os.path.exists(db_path_str):
-            print(f"❌ Индекс не найден: {db_path_str}")
-            return
+    elif sub == "compare":
+        import sys as _sys
+        db_path_str = rag_state.get("db_path", "")
+        _rag_dir = _get_rag_indexer_path()
+        if _rag_dir not in _sys.path:
+            _sys.path.insert(0, _rag_dir)
+
+        try:
+            from src.embedding.provider import EmbeddingProvider
+            from src.pipeline import IndexingPipeline
+        except ImportError:
+            return "RAG-модуль не найден."
+
+        if not os.path.exists(db_path_str):
+            return f"Индекс не найден: {db_path_str}"
         try:
             provider = EmbeddingProvider.create("local")
             pipeline = IndexingPipeline(docs_path=".", db_path=db_path_str, embedding_provider=provider)
             pipeline.compare_strategies()
+            return ""
         except Exception as exc:
-            print(f"❌ Ошибка: {exc}", file=_sys.stderr)
-        return
+            return f"Ошибка: {exc}"
 
-    # ---- Помощь ----
-    print("Использование:")
-    print('  /rag search "<запрос>"              — поиск по индексу')
-    print('  /rag search "<запрос>" --strategy fixed_500')
-    print('  /rag search "<запрос>" --top_k 10')
-    print('  /rag stats                           — статистика всех стратегий')
-    print('  /rag stats fixed_500                 — статистика стратегии')
-    print('  /rag compare                         — ASCII-таблица сравнения')
-    print(f'\n  БД: {db_path_str}')
-    print('  Задайте RAG_DB_PATH в .env для кастомного пути.')
+    else:
+        return "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare]"
 
 
 def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
@@ -1429,6 +1540,7 @@ def handle_command(
     task_orchestrator: TaskOrchestrator | None = None,
     invariant_loader: InvariantLoader | None = None,
     mcp_state: dict | None = None,
+    rag_state: dict | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     try:
@@ -1855,7 +1967,12 @@ def handle_command(
 
     # ---- RAG-поиск ----
     if command == "/rag":
-        _handle_rag_command(parts)
+        if rag_state is None:
+            print("RAG не настроен.")
+        else:
+            result = _handle_rag_command(parts, rag_state)
+            if result:
+                print(result)
         return current_strategy_num, True
 
     # ---- Общие ----
@@ -1930,6 +2047,21 @@ def run_interactive(provider: str, model: str | None) -> None:
             config_path=os.path.join(_project_root, "config", "mcp-servers.md")
         )
 
+    # RAG-состояние: режим поиска + ленивая инициализация ретривера
+    _rag_db_path = os.environ.get(
+        "RAG_DB_PATH",
+        os.path.join(_project_root, "rag_indexer", "output", "index.db"),
+    )
+    rag_state: dict = {
+        "mode": "off",
+        "db_path": _rag_db_path,
+        "strategy_filter": os.environ.get("RAG_STRATEGY_FILTER") or None,
+        "top_k": int(os.environ.get("RAG_TOP_K", "5")),
+        "store": None,
+        "embedder": None,
+        "retrievers": {},
+    }
+
     _inv_cats = invariant_loader.categories
     _inv_req = sum(len(c.required) for c in _inv_cats)
     _inv_rec = sum(len(c.recommended) for c in _inv_cats)
@@ -1954,7 +2086,8 @@ def run_interactive(provider: str, model: str | None) -> None:
             if task_orchestrator.has_active_task:
                 t = task_orchestrator.active_task
                 task_info = f"|T:{t.status.value}"
-            prefix = f"[{agent.provider_name}|{current_strategy_num}{profile_info}{task_info}]{branch_info}"
+            rag_info = f"|RAG:{rag_state['mode']}" if rag_state.get("mode", "off") != "off" else ""
+            prefix = f"[{agent.provider_name}|{current_strategy_num}{profile_info}{task_info}{rag_info}]{branch_info}"
             raw = input(f"{prefix} Вы: ")
         except (KeyboardInterrupt, EOFError):
             print("\nДо свидания!")
@@ -1982,6 +2115,7 @@ def run_interactive(provider: str, model: str | None) -> None:
                 task_orchestrator=task_orchestrator,
                 invariant_loader=invariant_loader,
                 mcp_state=mcp_state,
+                rag_state=rag_state,
             )
             if handled:
                 continue
@@ -1990,6 +2124,8 @@ def run_interactive(provider: str, model: str | None) -> None:
             with spinner():
                 if task_orchestrator.has_active_task:
                     reply = task_orchestrator.handle_message(user_input)
+                elif rag_state.get("mode", "off") != "off":
+                    reply = _run_rag_query(user_input, rag_state, agent)
                 else:
                     reply = agent.ask(user_input)
 

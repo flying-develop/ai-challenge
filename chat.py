@@ -27,6 +27,11 @@
     /research status       текущий этап и прогресс
     /research log          журнал последнего исследования
     /research last         финальный ответ последнего исследования
+    /rag vector            включить RAG (vector similarity)
+    /rag hybrid            включить RAG (vector + BM25/RRF)
+    /rag off               отключить RAG
+    /rag status            статус RAG (режим, db, чанки)
+    /rag eval              оценка качества (10 вопросов × retrievers)
     /help                  полная справка
 
 Конфигурация (.env):
