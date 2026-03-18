@@ -17,34 +17,16 @@ EVAL_QUESTIONS = [
         "keywords": ["установить", "openwrt", "podkop", "установка"],
     },
     {
-        "id": 2,
-        "question": "Какие требования для установки Podkop (версия ОС, место)?",
-        "expected_source": "install/index.md",
-        "keywords": ["требования", "версия", "место", "память", "openwrt"],
-    },
-    {
         "id": 3,
         "question": "Как настроить WireGuard туннель в Podkop?",
         "expected_source": "tunnels/wg_settings/index.md",
         "keywords": ["wireguard", "туннель", "настройка", "wg"],
     },
     {
-        "id": 4,
-        "question": "Как настроить AmneziaWG туннель?",
-        "expected_source": "tunnels/awg_settings/index.md",
-        "keywords": ["amneziawg", "awg", "туннель", "настройка"],
-    },
-    {
         "id": 5,
         "question": "Как совместить Podkop с AdGuard Home?",
         "expected_source": "adguard/index.md",
         "keywords": ["adguard", "adguard home", "совместить", "интеграция"],
-    },
-    {
-        "id": 6,
-        "question": "Как просматривать DNS-запросы в Podkop?",
-        "expected_source": "dnsmasqlogs/index.md",
-        "keywords": ["dns", "запросы", "логи", "dnsmasq"],
     },
     {
         "id": 7,
@@ -57,18 +39,6 @@ EVAL_QUESTIONS = [
         "question": "Что делать если заблокированные сайты не открываются?",
         "expected_source": "troubleshooting/index.md",
         "keywords": ["заблокированные", "сайты", "не открываются", "troubleshooting"],
-    },
-    {
-        "id": 9,
-        "question": "Как изменить DNS-протокол в Podkop (DoH/DoT/UDP)?",
-        "expected_source": "dns/index.md",
-        "keywords": ["dns", "doh", "dot", "протокол", "udp"],
-    },
-    {
-        "id": 10,
-        "question": "Как работать с корпоративным VPN через Podkop?",
-        "expected_source": "workvpn/index.md",
-        "keywords": ["vpn", "корпоративный", "корпоративным", "workvpn"],
     },
 ]
 

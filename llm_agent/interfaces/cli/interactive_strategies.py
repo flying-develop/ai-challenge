@@ -230,15 +230,32 @@ MCP (Model Context Protocol):
   (Telegram: задайте TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID в .env)
 
 RAG-ПОИСК (документы podkop-wiki):
+  /rag vector|hybrid|bm25  — включить RAG с выбранным режимом поиска
+  /rag off                 — отключить RAG
+  /rag status              — статус: режим, db, реранкинг, rewrite
+
+  Реранкинг (второй этап после поиска):
+  /rag rerank none         — без реранкинга (baseline)
+  /rag rerank threshold    — фильтр по порогу score (RERANK_THRESHOLD=0.3)
+  /rag rerank cohere       — Cohere Rerank v3.5 (нужен COHERE_API_KEY)
+  /rag rerank ollama       — локальная модель Ollama (нужен запущенный ollama)
+
+  Query rewrite (перефразирование запроса перед поиском):
+  /rag rewrite on|off      — включить/отключить query rewrite
+
+  Оценка:
+  /rag eval                — прогнать 10 вопросов по всем доступным конфигурациям
+  /rag compare             — сравнительная таблица последнего eval (см. /rag eval)
+
+  Прямой поиск:
   /rag search "<запрос>"  — найти релевантные чанки из индекса
-    Пример: /rag search "как установить podkop"
   /rag search "<запрос>" --strategy fixed_500  — поиск по конкретной стратегии
   /rag search "<запрос>" --top_k 10            — вернуть 10 результатов
   /rag stats               — статистика индекса (все стратегии)
   /rag stats fixed_500     — статистика по стратегии
-  /rag compare             — ASCII-таблица сравнения стратегий
   (Требует: pre-built индекс; задайте RAG_DB_PATH в .env или ./output/index.db)
   (Эмбеддинги: DASHSCOPE_API_KEY для Qwen, иначе LocalRandomEmbedder)
+  (Cohere: COHERE_API_KEY; Ollama: ollama serve && ollama pull qwen2.5:3b)
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
@@ -941,6 +958,27 @@ def _get_rag_indexer_path() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "rag_indexer"))
 
 
+def _make_agent_llm_fn(agent):
+    """Создать llm_fn из LLM-клиента агента (без засорения истории чата).
+
+    Возвращает функцию (system_prompt, user_prompt) -> str,
+    совместимую с RAGEvaluator и PipelineEvaluator.
+    """
+    from llm_agent.domain.models import ChatMessage
+
+    client = agent._llm_client
+
+    def llm_fn(system_prompt: str, user_prompt: str) -> str:
+        messages = []
+        if system_prompt:
+            messages.append(ChatMessage(role="system", content=system_prompt))
+        messages.append(ChatMessage(role="user", content=user_prompt))
+        response = client.generate(messages)
+        return response.text
+
+    return llm_fn
+
+
 def _init_rag_retrievers(rag_state: dict) -> str:
     """Lazy init of IndexStore, embedder, and retrievers. Returns error msg or empty str."""
     import os
@@ -987,7 +1025,11 @@ def _init_rag_retrievers(rag_state: dict) -> str:
 
 
 def _run_rag_query(query: str, rag_state: dict, agent) -> str:
-    """Run a RAG query and return the answer."""
+    """Run a RAG query and return the answer.
+
+    Если включён реранкинг или query rewrite — использует RAGPipeline.
+    Иначе — прямой поиск + RAGQueryBuilder (legacy поведение).
+    """
     import os
     import sys
     mode = rag_state.get("mode", "off")
@@ -995,16 +1037,73 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
     if not retriever:
         return agent.ask(query)
 
+    rag_root = os.path.normpath(os.path.join(os.path.dirname(rag_state["db_path"]), "..", ".."))
+    if rag_root not in sys.path:
+        sys.path.insert(0, rag_root)
+
+    rerank_mode = rag_state.get("rerank_mode", "none")
+    rewrite_on = rag_state.get("rewrite", False)
+
+    # Если включён реранкинг или rewrite — используем RAGPipeline
+    if rerank_mode != "none" or rewrite_on:
+        try:
+            from src.retrieval.reranker import ThresholdFilter, CohereReranker, OllamaReranker
+            from src.retrieval.query_rewrite import QueryRewriter
+            from src.retrieval.pipeline import RAGPipeline
+        except ImportError as e:
+            print(f"[WARN] Не удалось импортировать pipeline: {e}. Используется базовый поиск.")
+            rerank_mode = "none"
+            rewrite_on = False
+        else:
+            llm_fn = rag_state.get("llm_fn") or _make_agent_llm_fn(agent)
+
+            # Выбор реранкера
+            reranker = None
+            if rerank_mode == "threshold":
+                threshold = float(os.environ.get("RERANK_THRESHOLD", "0.3"))
+                reranker = ThresholdFilter(threshold=threshold)
+            elif rerank_mode == "cohere":
+                reranker = CohereReranker()
+            elif rerank_mode == "ollama":
+                ollama_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+                ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+                reranker = OllamaReranker(model=ollama_model, base_url=ollama_base)
+
+            # Query rewriter
+            query_rewriter = QueryRewriter(llm_fn) if rewrite_on else None
+
+            pipeline = RAGPipeline(
+                retriever=retriever,
+                llm_fn=llm_fn,
+                reranker=reranker,
+                query_rewriter=query_rewriter,
+            )
+
+            top_k = rag_state.get("top_k", 5)
+            initial_k = int(os.environ.get("RERANK_INITIAL_K", "20")) if reranker else top_k
+
+            rag_answer = pipeline.answer(query, top_k=top_k, initial_k=initial_k)
+
+            if rag_answer.rewrite_variants:
+                print(f"\nЗапрос переформулирован ({len(rag_answer.rewrite_variants)} вариантов).")
+
+            if reranker:
+                print(f"Кандидаты → финал: {rag_answer.initial_results_count} → {rag_answer.final_results_count} ({rerank_mode})")
+
+            print("\nИсточники:")
+            seen: set = set()
+            for r in rag_answer.sources:
+                if r.source not in seen:
+                    print(f"  - {r.source} ({r.section or 'нет раздела'})")
+                    seen.add(r.source)
+
+            return rag_answer.answer
+
+    # Legacy: прямой поиск без реранкинга
     try:
         from src.retrieval.rag_query import RAGQueryBuilder
     except ImportError:
-        try:
-            rag_root = os.path.normpath(os.path.join(os.path.dirname(rag_state["db_path"]), "..", ".."))
-            if rag_root not in sys.path:
-                sys.path.insert(0, rag_root)
-            from src.retrieval.rag_query import RAGQueryBuilder
-        except ImportError:
-            return agent.ask(query)
+        return agent.ask(query)
 
     results = retriever.search(query, top_k=rag_state["top_k"])
     if not results:
@@ -1039,11 +1138,35 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         rag_state["mode"] = sub
         return f"RAG режим: {sub}"
 
+    elif sub == "rerank":
+        rerank_mode = parts[2] if len(parts) > 2 else ""
+        valid = ("none", "threshold", "cohere", "ollama")
+        if rerank_mode not in valid:
+            return f"Использование: /rag rerank [{' | '.join(valid)}]"
+        rag_state["rerank_mode"] = rerank_mode
+        if rerank_mode == "none":
+            return "Реранкинг отключён."
+        return f"Реранкинг: {rerank_mode}"
+
+    elif sub == "rewrite":
+        action = parts[2].lower() if len(parts) > 2 else ""
+        if action in ("on", "true", "1"):
+            rag_state["rewrite"] = True
+            return "Query rewrite: включён."
+        elif action in ("off", "false", "0"):
+            rag_state["rewrite"] = False
+            return "Query rewrite: отключён."
+        else:
+            current = "включён" if rag_state.get("rewrite") else "отключён"
+            return f"Query rewrite сейчас {current}.\nИспользование: /rag rewrite [on|off]"
+
     elif sub == "status":
         mode = rag_state.get("mode", "off")
         db_path = rag_state.get("db_path", "?")
         strategy = rag_state.get("strategy_filter") or "все стратегии"
         top_k = rag_state.get("top_k", 5)
+        rerank_mode = rag_state.get("rerank_mode", "none")
+        rewrite = "включён" if rag_state.get("rewrite") else "отключён"
         store = rag_state.get("store")
         chunks_info = ""
         if store:
@@ -1055,6 +1178,8 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         return (
             f"RAG статус:\n"
             f"  режим: {mode}\n"
+            f"  реранкинг: {rerank_mode}\n"
+            f"  query rewrite: {rewrite}\n"
             f"  db: {db_path}\n"
             f"  стратегия: {strategy}\n"
             f"  top_k: {top_k}{chunks_info}"
@@ -1065,19 +1190,118 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         if msg:
             return msg
         import sys
+        import json as _json
+        import urllib.request as _urllib
         rag_root = os.path.normpath(os.path.join(os.path.dirname(rag_state["db_path"]), "..", ".."))
         if rag_root not in sys.path:
             sys.path.insert(0, rag_root)
         try:
-            from src.retrieval.evaluator import RAGEvaluator
-            from src.retrieval.rag_query import RAGQueryBuilder
-        except ImportError as e:
-            return f"Ошибка импорта evaluator: {e}"
-        retrievers = list(rag_state["retrievers"].values())
-        evaluator = RAGEvaluator(retrievers, llm_fn=None, top_k=rag_state["top_k"])
-        results = evaluator.run()
-        evaluator.print_report(results)
-        return "Оценка завершена."
+            from src.retrieval.reranker import ThresholdFilter, CohereReranker, OllamaReranker
+            from src.retrieval.query_rewrite import QueryRewriter
+            from src.retrieval.pipeline import RAGPipeline, PipelineEvaluator
+            _pipeline_available = True
+        except ImportError:
+            _pipeline_available = False
+
+        if not _pipeline_available:
+            # fallback: старый evaluator без LLM
+            try:
+                from src.retrieval.evaluator import RAGEvaluator
+            except ImportError as e:
+                return f"Ошибка импорта evaluator: {e}"
+            retrievers = list(rag_state["retrievers"].values())
+            evaluator = RAGEvaluator(retrievers, llm_fn=None, top_k=rag_state["top_k"])
+            results = evaluator.run()
+            evaluator.print_report(results)
+            return "Оценка завершена (без LLM, без реранкинга)."
+
+        # Определяем llm_fn из rag_state или предупреждаем
+        llm_fn = rag_state.get("llm_fn")
+        if llm_fn is None:
+            return (
+                "Для /rag eval с пайплайнами нужен LLM.\n"
+                "Введите /rag hybrid сначала (инициализация ретривера), "
+                "затем /rag eval снова."
+            )
+
+        hybrid_ret = rag_state["retrievers"].get("hybrid")
+        if not hybrid_ret:
+            return "Ретривер 'hybrid' не инициализирован. Введите /rag hybrid."
+
+        top_k = rag_state.get("top_k", 5)
+        threshold = float(os.environ.get("RERANK_THRESHOLD", "0.3"))
+        ollama_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+        ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+        # Проверка Cohere
+        cohere_key = os.environ.get("COHERE_API_KEY", "")
+        cohere_ok = False
+        if cohere_key:
+            try:
+                payload = _json.dumps({
+                    "model": "rerank-v3.5", "query": "test",
+                    "documents": ["a", "b"], "top_n": 2,
+                }).encode()
+                req = _urllib.Request(
+                    "https://api.cohere.com/v2/rerank", data=payload,
+                    headers={"Authorization": f"Bearer {cohere_key}",
+                             "Content-Type": "application/json"},
+                )
+                with _urllib.urlopen(req, timeout=10):
+                    pass
+                cohere_ok = True
+            except Exception:
+                pass
+
+        # Проверка Ollama
+        ollama_ok = False
+        try:
+            with _urllib.urlopen(f"{ollama_base}/api/tags", timeout=3):
+                ollama_ok = True
+        except Exception:
+            pass
+
+        # Собираем пайплайны
+        pipelines = [
+            RAGPipeline(hybrid_ret, llm_fn),  # baseline
+            RAGPipeline(hybrid_ret, llm_fn, reranker=ThresholdFilter(threshold)),
+        ]
+        if cohere_ok:
+            pipelines.append(RAGPipeline(hybrid_ret, llm_fn, reranker=CohereReranker()))
+        else:
+            print("  [INFO] COHERE_API_KEY не задан или недоступен — конфигурации cohere/full пропущены.")
+        if ollama_ok:
+            pipelines.append(RAGPipeline(
+                hybrid_ret, llm_fn,
+                reranker=OllamaReranker(model=ollama_model, base_url=ollama_base),
+            ))
+        else:
+            print("  [INFO] Ollama недоступна — конфигурация ollama пропущена.")
+        if cohere_ok:
+            rewriter = QueryRewriter(llm_fn)
+            pipelines.append(RAGPipeline(
+                hybrid_ret, llm_fn,
+                reranker=CohereReranker(),
+                query_rewriter=rewriter,
+            ))
+
+        n_questions = 5
+        print(f"\n  Конфигурации для оценки: {', '.join(p.name for p in pipelines)}")
+        print(f"  Вопросов: {n_questions}  |  Вызовов LLM: {len(pipelines) * n_questions}\n")
+
+        import warnings as _warnings
+        evaluator = PipelineEvaluator(pipelines, top_k=top_k, initial_k=20)
+        with _warnings.catch_warnings(record=True):
+            _warnings.simplefilter("ignore")
+            eval_results = evaluator.run()
+
+        evaluator.print_comparison_table(eval_results)
+        evaluator.print_timing_summary(eval_results)
+
+        # Сохранить результаты в rag_state для /rag compare
+        rag_state["last_eval_results"] = eval_results
+        rag_state["last_eval_evaluator"] = evaluator
+        return "Оценка завершена. Используйте /rag compare для таблицы."
 
     elif sub == "search":
         # Legacy search subcommand — delegate to old-style inline search
@@ -1182,18 +1406,24 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         return "\n".join(lines)
 
     elif sub == "compare":
+        # Если есть результаты pipeline eval — показать их таблицу
+        last_results = rag_state.get("last_eval_results")
+        last_evaluator = rag_state.get("last_eval_evaluator")
+        if last_results and last_evaluator:
+            last_evaluator.print_comparison_table(last_results)
+            last_evaluator.print_timing_summary(last_results)
+            return ""
+        # Иначе — fallback на старый compare (стратегии индексации)
         import sys as _sys
         db_path_str = rag_state.get("db_path", "")
         _rag_dir = _get_rag_indexer_path()
         if _rag_dir not in _sys.path:
             _sys.path.insert(0, _rag_dir)
-
         try:
             from src.embedding.provider import EmbeddingProvider
             from src.pipeline import IndexingPipeline
         except ImportError:
             return "RAG-модуль не найден."
-
         if not os.path.exists(db_path_str):
             return f"Индекс не найден: {db_path_str}"
         try:
@@ -1205,7 +1435,11 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
             return f"Ошибка: {exc}"
 
     else:
-        return "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare]"
+        return (
+            "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare]\n"
+            "  Реранкинг: /rag rerank [none|threshold|cohere|ollama]\n"
+            "  Rewrite:   /rag rewrite [on|off]"
+        )
 
 
 def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
@@ -1970,6 +2204,9 @@ def handle_command(
         if rag_state is None:
             print("RAG не настроен.")
         else:
+            # Инжектируем llm_fn при первом обращении (нужен для pipeline eval и rewrite)
+            if rag_state.get("llm_fn") is None:
+                rag_state["llm_fn"] = _make_agent_llm_fn(agent)
             result = _handle_rag_command(parts, rag_state)
             if result:
                 print(result)
@@ -2053,13 +2290,21 @@ def run_interactive(provider: str, model: str | None) -> None:
         os.path.join(_project_root, "rag_indexer", "output", "index.db"),
     )
     rag_state: dict = {
-        "mode": "off",
+        "mode": os.environ.get("RAG_MODE", "off"),
         "db_path": _rag_db_path,
         "strategy_filter": os.environ.get("RAG_STRATEGY_FILTER") or None,
         "top_k": int(os.environ.get("RAG_TOP_K", "5")),
         "store": None,
         "embedder": None,
         "retrievers": {},
+        # Реранкинг
+        "rerank_mode": os.environ.get("RERANK_MODE", "none"),
+        "rewrite": os.environ.get("QUERY_REWRITE", "false").lower() in ("true", "1"),
+        # llm_fn инжектируется при первом /rag eval
+        "llm_fn": None,
+        # Результаты последнего eval для /rag compare
+        "last_eval_results": None,
+        "last_eval_evaluator": None,
     }
 
     _inv_cats = invariant_loader.categories
