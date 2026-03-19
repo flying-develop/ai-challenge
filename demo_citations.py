@@ -56,21 +56,31 @@ except ImportError as exc:
 
 # ── LLM-функция (через mcp_server или прямой API) ───────────────────────────
 def _make_llm_fn():
-    """Создаёт LLM-функцию из доступных провайдеров."""
+    """Создаёт LLM-функцию с сигнатурой (system: str, user: str) -> str.
+
+    RAGPipeline требует именно такую сигнатуру.
+    create_llm_fn() возвращает (prompt: str) -> str, поэтому оборачиваем.
+    """
+    import urllib.request
+    import json
+
+    # Сначала пробуем mcp_server.llm_client — оборачиваем в (system, user) -> str
     try:
         from mcp_server.llm_client import create_llm_fn
-        return create_llm_fn(timeout=60.0)
+        _one_arg_fn = create_llm_fn(timeout=60.0)
+
+        def _wrapped(system: str, user: str) -> str:
+            combined = f"{system}\n\n{user}" if system else user
+            return _one_arg_fn(combined)
+
+        return _wrapped
     except Exception:
         pass
 
-    # Fallback: прямой вызов через openai-совместимый API
+    # Fallback: прямой вызов через openai-совместимый API (уже 2-arg)
     qwen_key = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
 
     if qwen_key:
-        import urllib.request
-        import json
-
         base_url = os.environ.get(
             "QWEN_BASE_URL",
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
