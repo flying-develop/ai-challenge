@@ -8,6 +8,10 @@
 Ключевое: initial_k (20) > top_k (5) — реранкер выбирает лучших
 из широкого набора кандидатов, что улучшает качество.
 
+Режим структурированного ответа (use_structured=True):
+    Добавляет к цепочке: ConfidenceScorer → StructuredRAGPrompt → ResponseParser
+    LLM возвращает ответ в формате [ANSWER]/[SOURCES]/[QUOTES].
+
 Использование:
     from src.retrieval.pipeline import RAGPipeline, PipelineEvaluator
 
@@ -16,9 +20,12 @@
         llm_fn=my_llm_fn,
         reranker=CohereReranker(),
         query_rewriter=QueryRewriter(llm_fn=my_llm_fn),
+        use_structured=True,
     )
     rag_answer = pipeline.answer("Как установить podkop?", top_k=5, initial_k=20)
     print(rag_answer.answer)
+    if rag_answer.structured:
+        print(rag_answer.structured.verified_ratio)
 """
 from __future__ import annotations
 
@@ -31,6 +38,9 @@ from .rag_query import RAGQueryBuilder
 from .reranker import Reranker
 from .query_rewrite import QueryRewriter
 from .evaluator import EVAL_QUESTIONS
+from .confidence import ConfidenceScorer
+from .structured_prompt import StructuredRAGPrompt
+from .response_parser import ResponseParser, StructuredResponse
 
 
 @dataclass
@@ -47,6 +57,8 @@ class RAGAnswer:
     retrieval_time_ms: float
     rerank_time_ms: float
     llm_time_ms: float
+    structured: Optional[StructuredResponse] = None  # заполнен при use_structured=True
+    confidence: float = 0.0         # средний score контекста
 
 
 class RAGPipeline:
@@ -55,6 +67,9 @@ class RAGPipeline:
     Каждый компонент опционален:
         - без rewriter: поиск идёт по исходному вопросу
         - без reranker: берём top_k из результатов поиска напрямую
+
+    При use_structured=True добавляет:
+        ConfidenceScorer → StructuredRAGPrompt → ResponseParser → верификация цитат
     """
 
     def __init__(
@@ -64,20 +79,26 @@ class RAGPipeline:
         reranker: Optional[Reranker] = None,
         query_rewriter: Optional[QueryRewriter] = None,
         query_builder: Optional[RAGQueryBuilder] = None,
+        use_structured: bool = False,
     ):
         """
         Args:
-            retriever:      Стратегия поиска (vector/bm25/hybrid).
-            llm_fn:         Функция (system_prompt, user_prompt) -> ответ строкой.
-            reranker:       Опциональный реранкер (Cohere, Ollama, ThresholdFilter).
-            query_rewriter: Опциональный переформулировщик запросов.
-            query_builder:  Builder промптов (по умолчанию RAGQueryBuilder()).
+            retriever:       Стратегия поиска (vector/bm25/hybrid).
+            llm_fn:          Функция (system_prompt, user_prompt) -> ответ строкой.
+            reranker:        Опциональный реранкер (Cohere, Ollama, ThresholdFilter).
+            query_rewriter:  Опциональный переформулировщик запросов.
+            query_builder:   Builder промптов (по умолчанию RAGQueryBuilder()).
+            use_structured:  True — использовать structured prompt + parser + верификацию.
         """
         self.retriever = retriever
         self.llm_fn = llm_fn
         self.reranker = reranker
         self.query_rewriter = query_rewriter
         self.query_builder = query_builder or RAGQueryBuilder()
+        self.use_structured = use_structured
+        self._confidence_scorer = ConfidenceScorer()
+        self._structured_prompt = StructuredRAGPrompt()
+        self._response_parser = ResponseParser()
 
     @property
     def name(self) -> str:
@@ -137,9 +158,23 @@ class RAGPipeline:
 
         # 4. Формирование промпта и вызов LLM
         t2 = time.monotonic()
-        build_kwargs = {} if max_tokens is None else {"max_tokens": max_tokens}
-        ctx = self.query_builder.build(question, results, **build_kwargs)
-        answer_text = self.llm_fn(ctx.system_prompt, ctx.user_prompt)
+        structured_response: Optional[StructuredResponse] = None
+        confidence = self._confidence_scorer.score(results)
+
+        if self.use_structured:
+            # Структурированный режим: [ANSWER]/[SOURCES]/[QUOTES]
+            prompt = self._structured_prompt.build(question, results, confidence)
+            raw_answer = self.llm_fn(prompt.system, prompt.user)
+            structured_response = self._response_parser.parse(
+                raw_answer, results, confidence
+            )
+            answer_text = structured_response.answer
+        else:
+            # Обычный режим (совместимость)
+            build_kwargs = {} if max_tokens is None else {"max_tokens": max_tokens}
+            ctx = self.query_builder.build(question, results, **build_kwargs)
+            answer_text = self.llm_fn(ctx.system_prompt, ctx.user_prompt)
+
         llm_time_ms = (time.monotonic() - t2) * 1000
 
         return RAGAnswer(
@@ -153,6 +188,8 @@ class RAGPipeline:
             retrieval_time_ms=retrieval_time_ms,
             rerank_time_ms=rerank_time_ms,
             llm_time_ms=llm_time_ms,
+            structured=structured_response,
+            confidence=confidence,
         )
 
 

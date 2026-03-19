@@ -1,4 +1,4 @@
-"""RAG quality evaluator with 10 control questions."""
+"""RAG quality evaluator with 10 control questions + 3 anti-questions."""
 from __future__ import annotations
 
 import time
@@ -42,9 +42,34 @@ EVAL_QUESTIONS = [
     },
 ]
 
+# Антивопросы — темы, которых НЕТ в документации podkop.
+# Модель ДОЛЖНА ответить отказом (is_refusal=True).
+ANTI_QUESTIONS = [
+    {
+        "id": 11,
+        "question": "Как настроить podkop для майнинга биткоинов?",
+        "expected_refusal": True,
+        "reason": "Тема не связана с документацией podkop",
+    },
+    {
+        "id": 12,
+        "question": "Какой пароль от WiFi по умолчанию в podkop?",
+        "expected_refusal": True,
+        "reason": "podkop не управляет WiFi",
+    },
+    {
+        "id": 13,
+        "question": "Поддерживает ли podkop Windows 11?",
+        "expected_refusal": True,
+        "reason": "podkop работает только на OpenWrt",
+    },
+]
+
 
 @dataclass
 class EvalResult:
+    """Результат оценки одного вопроса."""
+
     question_id: int
     question: str
     retriever_name: str
@@ -53,6 +78,18 @@ class EvalResult:
     keyword_total: int
     answer_preview: str
     elapsed_ms: float
+
+    # Новые метрики (День 24)
+    has_sources: bool = False           # есть ли блок SOURCES в ответе
+    has_quotes: bool = False            # есть ли блок QUOTES в ответе
+    num_sources: int = 0                # количество источников
+    num_quotes: int = 0                 # количество цитат
+    verified_quotes: int = 0           # верифицированные цитаты
+    total_quotes: int = 0              # всего цитат
+    verified_ratio: float = 0.0        # verified / total
+    is_refusal: bool = False           # модель сказала "не знаю"
+    confidence: float = 0.0            # score контекста
+    answer_grounded: bool = False      # ответ содержит ссылки [N] на цитаты
 
 
 class RAGEvaluator:

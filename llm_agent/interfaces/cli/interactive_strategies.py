@@ -243,8 +243,14 @@ RAG-ПОИСК (документы podkop-wiki):
   Query rewrite (перефразирование запроса перед поиском):
   /rag rewrite on|off      — включить/отключить query rewrite
 
+  Цитаты и источники (День 24):
+  /rag citations on|off    — включить/отключить обязательные цитаты в ответе
+  /rag confidence          — показать confidence последнего запроса
+  /rag verify              — верифицировать цитаты последнего ответа
+
   Оценка:
   /rag eval                — прогнать 10 вопросов по всем доступным конфигурациям
+  /rag eval full           — полный прогон: 10 вопросов + 3 антивопроса с цитатами
   /rag compare             — сравнительная таблица последнего eval (см. /rag eval)
 
   Прямой поиск:
@@ -1043,9 +1049,10 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
 
     rerank_mode = rag_state.get("rerank_mode", "none")
     rewrite_on = rag_state.get("rewrite", False)
+    citations_on = rag_state.get("citations", False)
 
-    # Если включён реранкинг или rewrite — используем RAGPipeline
-    if rerank_mode != "none" or rewrite_on:
+    # Если включён citations, реранкинг или rewrite — используем RAGPipeline
+    if rerank_mode != "none" or rewrite_on or citations_on:
         try:
             from src.retrieval.reranker import ThresholdFilter, CohereReranker, OllamaReranker
             from src.retrieval.query_rewrite import QueryRewriter
@@ -1054,6 +1061,7 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
             print(f"[WARN] Не удалось импортировать pipeline: {e}. Используется базовый поиск.")
             rerank_mode = "none"
             rewrite_on = False
+            citations_on = False
         else:
             llm_fn = rag_state.get("llm_fn") or _make_agent_llm_fn(agent)
 
@@ -1077,6 +1085,7 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
                 llm_fn=llm_fn,
                 reranker=reranker,
                 query_rewriter=query_rewriter,
+                use_structured=citations_on,
             )
 
             top_k = rag_state.get("top_k", 5)
@@ -1090,6 +1099,22 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
             if reranker:
                 print(f"Кандидаты → финал: {rag_answer.initial_results_count} → {rag_answer.final_results_count} ({rerank_mode})")
 
+            # Режим цитат: показываем структурированный ответ
+            if citations_on and rag_answer.structured:
+                rag_state["last_structured_response"] = rag_answer.structured
+                rag_state["last_confidence"] = rag_answer.confidence
+                try:
+                    from src.retrieval.formatter import format_structured_response, format_refusal
+                    sr = rag_answer.structured
+                    if sr.is_refusal:
+                        print(format_refusal(sr))
+                    else:
+                        print(format_structured_response(sr))
+                except ImportError:
+                    pass
+                return ""  # уже напечатано
+
+            # Обычный режим: печатаем источники
             print("\nИсточники:")
             seen: set = set()
             for r in rag_answer.sources:
@@ -1097,6 +1122,7 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
                     print(f"  - {r.source} ({r.section or 'нет раздела'})")
                     seen.add(r.source)
 
+            rag_state["last_confidence"] = rag_answer.confidence
             return rag_answer.answer
 
     # Legacy: прямой поиск без реранкинга
@@ -1120,6 +1146,151 @@ def _run_rag_query(query: str, rag_state: dict, agent) -> str:
             seen.add(r.source)
 
     return reply
+
+
+def _handle_rag_eval_full(parts: list[str], rag_state: dict) -> str:
+    """Полный прогон: 10 основных вопросов + 3 антивопроса со structured-промптом."""
+    import os
+    import sys as _sys
+
+    msg = _init_rag_retrievers(rag_state)
+    if msg:
+        return msg
+
+    llm_fn = rag_state.get("llm_fn")
+    if llm_fn is None:
+        return "Для /rag eval full нужен LLM. Введите /rag hybrid сначала."
+
+    hybrid_ret = rag_state["retrievers"].get("hybrid")
+    if not hybrid_ret:
+        return "Ретривер 'hybrid' не инициализирован. Введите /rag hybrid."
+
+    _rag_dir = _get_rag_indexer_path()
+    if _rag_dir not in _sys.path:
+        _sys.path.insert(0, _rag_dir)
+
+    try:
+        from src.retrieval.pipeline import RAGPipeline
+        from src.retrieval.evaluator import EVAL_QUESTIONS, ANTI_QUESTIONS
+        from src.retrieval.confidence import ConfidenceScorer
+        from src.retrieval.response_parser import ResponseParser
+        from src.retrieval.formatter import format_structured_response
+    except ImportError as e:
+        return f"Ошибка импорта модулей цитат: {e}"
+
+    threshold = float(os.environ.get("RAG_CONFIDENCE_THRESHOLD", "0.4"))
+    pipeline = RAGPipeline(hybrid_ret, llm_fn, use_structured=True)
+    scorer = ConfidenceScorer()
+
+    # ── Основные вопросы ─────────────────────────────────────────────────────
+    print("\n\n══════════ STRUCTURED RAG EVAL (10 вопросов + 3 антивопроса) ══════════\n")
+    print("Прогон основных вопросов...")
+
+    main_rows = []
+    for q in EVAL_QUESTIONS:
+        try:
+            rag_answer = pipeline.answer(q["question"], top_k=5, initial_k=20)
+        except Exception as exc:
+            print(f"  [ОШИБКА] вопрос {q['id']}: {exc}")
+            continue
+
+        sr = rag_answer.structured
+        if sr:
+            num_src = len(sr.sources)
+            num_q = len(sr.quotes)
+            ver = len(sr.verified_quotes)
+            total_q = len(sr.quotes)
+            ver_pct = int(sr.verified_ratio * 100) if total_q else 0
+            is_ref = sr.is_refusal
+        else:
+            num_src = num_q = ver = total_q = ver_pct = 0
+            is_ref = False
+
+        conf = rag_answer.confidence
+        main_rows.append({
+            "id": q["id"],
+            "question": q["question"],
+            "num_src": num_src,
+            "num_q": num_q,
+            "ver": ver,
+            "total_q": total_q,
+            "ver_pct": ver_pct,
+            "conf": conf,
+            "is_ref": is_ref,
+        })
+
+    # Таблица основных вопросов
+    w = 31
+    print(f"\n╔═════╦{'═' * w}╦═══════╦════════╦════════╦══════════╗")
+    print(f"║  #  ║ {'Вопрос':<{w - 1}}║  Src  ║ Quotes ║ Verif  ║  Conf    ║")
+    print(f"╠═════╬{'═' * w}╬═══════╬════════╬════════╬══════════╣")
+    sum_src = sum_q = sum_ver = sum_total_q = sum_conf = 0
+    for row in main_rows:
+        q_short = row["question"][: w - 2]
+        ver_str = f"{row['ver_pct']}%" if row["total_q"] else "—"
+        print(
+            f"║ {row['id']:<4}║ {q_short:<{w - 1}}║  {row['num_src']:<5}║  {row['num_q']:<6}║ {ver_str:<6} ║ {row['conf']:.2f}     ║"
+        )
+        sum_src += row["num_src"]
+        sum_q += row["num_q"]
+        sum_conf += row["conf"]
+        if row["total_q"]:
+            sum_ver += row["ver"]
+            sum_total_q += row["total_q"]
+    n = len(main_rows) or 1
+    avg_src = sum_src / n
+    avg_q = sum_q / n
+    avg_conf = sum_conf / n
+    avg_ver_pct = int(sum_ver / sum_total_q * 100) if sum_total_q else 0
+    print(f"╠═════╬{'═' * w}╬═══════╬════════╬════════╬══════════╣")
+    print(
+        f"║ AVG ║ {'':< {w - 1}}║ {avg_src:<5.1f} ║ {avg_q:<6.1f} ║ {avg_ver_pct}%    ║ {avg_conf:.2f}     ║"
+    )
+    print(f"╚═════╩{'═' * w}╩═══════╩════════╩════════╩══════════╝")
+
+    # ── Антивопросы ───────────────────────────────────────────────────────────
+    print("\nПрогон антивопросов...")
+    anti_rows = []
+    for aq in ANTI_QUESTIONS:
+        try:
+            rag_answer = pipeline.answer(aq["question"], top_k=5, initial_k=20)
+        except Exception as exc:
+            print(f"  [ОШИБКА] антивопрос {aq['id']}: {exc}")
+            continue
+
+        sr = rag_answer.structured
+        is_ref = sr.is_refusal if sr else False
+        conf = rag_answer.confidence
+        anti_rows.append({
+            "id": aq["id"],
+            "question": aq["question"],
+            "is_ref": is_ref,
+            "conf": conf,
+        })
+
+    print(f"\n╔═════╦{'═' * w}╦══════════╦═══════╗")
+    print(f"║  #  ║ {'Вопрос':<{w - 1}}║ Отказал? ║ Conf  ║")
+    print(f"╠═════╬{'═' * w}╬══════════╬═══════╣")
+    for row in anti_rows:
+        q_short = row["question"][: w - 2]
+        ref_str = "✅ да" if row["is_ref"] else "❌ нет"
+        print(f"║ {row['id']:<4}║ {q_short:<{w - 1}}║ {ref_str:<8} ║ {row['conf']:.2f}  ║")
+    print(f"╚═════╩{'═' * w}╩══════════╩═══════╝")
+
+    # ── Итоговые метрики ─────────────────────────────────────────────────────
+    with_src = sum(1 for r in main_rows if r["num_src"] > 0)
+    with_q = sum(1 for r in main_rows if r["num_q"] > 0)
+    refusals_correct = sum(1 for r in anti_rows if r["is_ref"])
+    false_refusals = sum(1 for r in main_rows if r["is_ref"])
+
+    print("\n  Итоговые показатели:")
+    print(f"    Вопросов с источниками:     {with_src}/{len(main_rows)} ({int(with_src / n * 100)}%)")
+    print(f"    Вопросов с цитатами:        {with_q}/{len(main_rows)} ({int(with_q / n * 100)}%)")
+    print(f"    Средний verified_ratio:     {avg_ver_pct}%")
+    print(f"    Антивопросов с отказом:     {refusals_correct}/{len(anti_rows)}")
+    print(f"    Ложных отказов:             {false_refusals}/{len(main_rows)}")
+
+    return "\nОценка завершена."
 
 
 def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
@@ -1160,6 +1331,65 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
             current = "включён" if rag_state.get("rewrite") else "отключён"
             return f"Query rewrite сейчас {current}.\nИспользование: /rag rewrite [on|off]"
 
+    elif sub == "citations":
+        action = parts[2].lower() if len(parts) > 2 else ""
+        if action in ("on", "true", "1"):
+            rag_state["citations"] = True
+            return "Режим цитат: включён. Каждый ответ будет содержать [ANSWER]/[SOURCES]/[QUOTES]."
+        elif action in ("off", "false", "0"):
+            rag_state["citations"] = False
+            return "Режим цитат: отключён."
+        else:
+            current = "включён" if rag_state.get("citations") else "отключён"
+            return f"Режим цитат сейчас {current}.\nИспользование: /rag citations [on|off]"
+
+    elif sub == "confidence":
+        last = rag_state.get("last_structured_response")
+        if last is None:
+            conf = rag_state.get("last_confidence")
+            if conf is None:
+                return "Нет данных о confidence. Задайте вопрос с включённым RAG."
+            return f"Confidence последнего запроса: {conf:.3f}"
+        import sys as _sys
+        _rag_dir = _get_rag_indexer_path()
+        if _rag_dir not in _sys.path:
+            _sys.path.insert(0, _rag_dir)
+        try:
+            from src.retrieval.confidence import ConfidenceScorer, ConfidenceLevel
+            from src.retrieval.formatter import format_confidence_level
+        except ImportError:
+            return f"Confidence: {last.confidence:.3f}"
+        scorer = ConfidenceScorer()
+        level = (
+            ConfidenceLevel.HIGH if last.confidence >= scorer.HIGH_THRESHOLD
+            else ConfidenceLevel.MEDIUM if last.confidence >= scorer.DEFAULT_THRESHOLD
+            else ConfidenceLevel.LOW
+        )
+        return format_confidence_level(level, last.confidence)
+
+    elif sub == "verify":
+        last = rag_state.get("last_structured_response")
+        if last is None:
+            return "Нет данных для верификации. Задайте вопрос с включённым режимом цитат (/rag citations on)."
+        import sys as _sys
+        _rag_dir = _get_rag_indexer_path()
+        if _rag_dir not in _sys.path:
+            _sys.path.insert(0, _rag_dir)
+        try:
+            from src.retrieval.formatter import format_structured_response
+        except ImportError:
+            pass
+        lines = ["\nВерификация цитат последнего ответа:"]
+        if not last.quotes:
+            lines.append("  Цитат нет.")
+        else:
+            for q in last.quotes:
+                status = "✅ подтверждена" if q.verified else "❌ не найдена в контексте"
+                lines.append(f'  [{q.index}] {status}: "{q.text[:80]}..."')
+            pct = int(last.verified_ratio * 100)
+            lines.append(f"\nИтого: {len(last.verified_quotes)}/{len(last.quotes)} ({pct}%)")
+        return "\n".join(lines)
+
     elif sub == "status":
         mode = rag_state.get("mode", "off")
         db_path = rag_state.get("db_path", "?")
@@ -1186,6 +1416,9 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         )
 
     elif sub == "eval":
+        eval_mode = parts[2] if len(parts) > 2 else ""
+        if eval_mode == "full":
+            return _handle_rag_eval_full(parts, rag_state)
         msg = _init_rag_retrievers(rag_state)
         if msg:
             return msg
@@ -1438,7 +1671,10 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         return (
             "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare]\n"
             "  Реранкинг: /rag rerank [none|threshold|cohere|ollama]\n"
-            "  Rewrite:   /rag rewrite [on|off]"
+            "  Rewrite:   /rag rewrite [on|off]\n"
+            "  Цитаты:    /rag citations [on|off]\n"
+            "  Данные:    /rag confidence | /rag verify\n"
+            "  Оценка:    /rag eval | /rag eval full"
         )
 
 
@@ -2305,6 +2541,10 @@ def run_interactive(provider: str, model: str | None) -> None:
         # Результаты последнего eval для /rag compare
         "last_eval_results": None,
         "last_eval_evaluator": None,
+        # Режим цитат (День 24)
+        "citations": os.environ.get("RAG_REQUIRE_CITATIONS", "false").lower() in ("true", "1"),
+        "last_structured_response": None,
+        "last_confidence": None,
     }
 
     _inv_cats = invariant_loader.categories
