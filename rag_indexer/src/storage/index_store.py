@@ -363,6 +363,19 @@ class IndexStore:
             )
         return cursor.rowcount
 
+    def clear_all(self) -> int:
+        """Удалить все чанки, эмбеддинги и метаданные из индекса.
+
+        Используется при переиндексации (новый источник полностью заменяет старый).
+
+        Returns:
+            Количество удалённых чанков.
+        """
+        with self._conn:
+            cursor = self._conn.execute("DELETE FROM chunks")
+            self._conn.execute("DELETE FROM index_meta")
+        return cursor.rowcount
+
     def set_meta(self, key: str, value: str) -> None:
         """Сохранить произвольное значение в index_meta."""
         with self._conn:
