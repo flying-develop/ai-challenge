@@ -1,4 +1,4 @@
-"""RAG quality evaluator with 10 control questions."""
+"""RAG quality evaluator with 10 control questions + 3 anti-questions."""
 from __future__ import annotations
 
 import time
@@ -17,16 +17,34 @@ EVAL_QUESTIONS = [
         "keywords": ["установить", "openwrt", "podkop", "установка"],
     },
     {
+        "id": 2,
+        "question": "Какие требования для установки Podkop (версия ОС, место)?",
+        "expected_source": "install/index.md",
+        "keywords": ["требования", "версия", "место", "память", "openwrt"],
+    },
+    {
         "id": 3,
         "question": "Как настроить WireGuard туннель в Podkop?",
         "expected_source": "tunnels/wg_settings/index.md",
         "keywords": ["wireguard", "туннель", "настройка", "wg"],
     },
     {
+        "id": 4,
+        "question": "Как настроить AmneziaWG туннель?",
+        "expected_source": "tunnels/awg_settings/index.md",
+        "keywords": ["amneziawg", "awg", "туннель", "настройка"],
+    },
+    {
         "id": 5,
         "question": "Как совместить Podkop с AdGuard Home?",
         "expected_source": "adguard/index.md",
         "keywords": ["adguard", "adguard home", "совместить", "интеграция"],
+    },
+    {
+        "id": 6,
+        "question": "Как просматривать DNS-запросы в Podkop?",
+        "expected_source": "dnsmasqlogs/index.md",
+        "keywords": ["dns", "запросы", "логи", "dnsmasq"],
     },
     {
         "id": 7,
@@ -40,11 +58,48 @@ EVAL_QUESTIONS = [
         "expected_source": "troubleshooting/index.md",
         "keywords": ["заблокированные", "сайты", "не открываются", "troubleshooting"],
     },
+    {
+        "id": 9,
+        "question": "Как изменить DNS-протокол в Podkop (DoH/DoT/UDP)?",
+        "expected_source": "dns/index.md",
+        "keywords": ["dns", "doh", "dot", "протокол", "udp"],
+    },
+    {
+        "id": 10,
+        "question": "Как работать с корпоративным VPN через Podkop?",
+        "expected_source": "workvpn/index.md",
+        "keywords": ["vpn", "корпоративный", "корпоративным", "workvpn"],
+    },
+]
+
+# Антивопросы — темы, которых НЕТ в документации podkop.
+# Модель ДОЛЖНА ответить отказом (is_refusal=True).
+ANTI_QUESTIONS = [
+    {
+        "id": 11,
+        "question": "Как настроить podkop для майнинга биткоинов?",
+        "expected_refusal": True,
+        "reason": "Тема не связана с документацией podkop",
+    },
+    {
+        "id": 12,
+        "question": "Какой пароль от WiFi по умолчанию в podkop?",
+        "expected_refusal": True,
+        "reason": "podkop не управляет WiFi",
+    },
+    {
+        "id": 13,
+        "question": "Поддерживает ли podkop Windows 11?",
+        "expected_refusal": True,
+        "reason": "podkop работает только на OpenWrt",
+    },
 ]
 
 
 @dataclass
 class EvalResult:
+    """Результат оценки одного вопроса."""
+
     question_id: int
     question: str
     retriever_name: str
@@ -53,6 +108,18 @@ class EvalResult:
     keyword_total: int
     answer_preview: str
     elapsed_ms: float
+
+    # Новые метрики (День 24)
+    has_sources: bool = False           # есть ли блок SOURCES в ответе
+    has_quotes: bool = False            # есть ли блок QUOTES в ответе
+    num_sources: int = 0                # количество источников
+    num_quotes: int = 0                 # количество цитат
+    verified_quotes: int = 0           # верифицированные цитаты
+    total_quotes: int = 0              # всего цитат
+    verified_ratio: float = 0.0        # verified / total
+    is_refusal: bool = False           # модель сказала "не знаю"
+    confidence: float = 0.0            # score контекста
+    answer_grounded: bool = False      # ответ содержит ссылки [N] на цитаты
 
 
 class RAGEvaluator:
