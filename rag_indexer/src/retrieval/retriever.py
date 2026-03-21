@@ -100,8 +100,12 @@ class BM25Retriever(RetrievalStrategy):
         return "bm25"
 
     def _build_index(self) -> None:
-        if self._index_built:
+        # Проверяем актуальность кеша — если количество чанков изменилось
+        # (например, после переиндексации), пересобираем BM25-индекс
+        current_count = self._store.get_stats(self._strategy_filter)["chunks"]
+        if self._index_built and self._N == current_count:
             return
+        self._index_built = False
         self._chunks = self._store.get_all_chunks(self._strategy_filter)
         self._N = len(self._chunks)
         self._tokenized = [_tokenize(c.text) for c in self._chunks]

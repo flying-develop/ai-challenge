@@ -241,7 +241,7 @@ class TelegramListener:
             DialogManager с изолированной историей и task state.
         """
         if chat_id not in self._sessions:
-            self._sessions[chat_id] = self._factory(user_id=chat_id)
+            self._sessions[chat_id] = self._factory.create(user_id=chat_id)
         return self._sessions[chat_id]
 
     def _send(self, chat_id: str, text: str) -> None:
