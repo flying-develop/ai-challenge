@@ -207,7 +207,9 @@ def _process_step(
         if has_sources:
             sources = structured.sources if structured else rag_answer.sources
             for i, src in enumerate(sources[:2], 1):
-                print(f"     [{i}] {src.source} — {src.section[:50]}")
+                # SourceRef: .file; RetrievalResult: .source
+                src_name = getattr(src, "file", None) or getattr(src, "source", "?")
+                print(f"     [{i}] {src_name} — {src.section[:50]}")
         if task_state:
             goal = task_state.get("goal", "")
             constraints = task_state.get("constraints", "")
@@ -256,7 +258,7 @@ def run_scenario(
     messages = scenario_messages[:max_messages] if max_messages else scenario_messages
 
     # Создаём изолированный DialogManager для этого сценария
-    user_id = f"demo_{scenario_name.lower().replace(' ', '_')}"
+    user_id = f"demo_{scenario_name.lower().replace(' ', '_').replace(':', '').replace('/', '_')}"
     dialog = _create_dialog_manager(user_id, rag_pipeline, llm_fn)
 
     print(f"\n{'=' * 60}")

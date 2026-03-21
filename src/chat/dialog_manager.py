@@ -137,11 +137,12 @@ class DialogManager:
         Returns:
             dict с ключами goal, constraints, clarified, stage.
         """
+        prefix = f"task_state_{self.user_id}:"
         entries = self.memory.get_working()
         state = {}
         for entry in entries:
-            if entry.key.startswith(f"task_state_{self.user_id}:"):
-                field_name = entry.key.split(":", 1)[1]
+            if entry.key.startswith(prefix):
+                field_name = entry.key[len(prefix):]
                 state[field_name] = entry.value
         return state
 
