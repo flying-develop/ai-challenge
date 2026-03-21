@@ -172,7 +172,13 @@ def main() -> None:
     index_manager = _build_index_manager()
 
     def index_fn(source_type: str, source_arg: str) -> None:
-        index_manager.reindex(source_type, source_arg)
+        if source_type == "clear":
+            from rag_indexer.src.storage.index_store import IndexStore
+            with IndexStore(_DB_PATH) as store:
+                deleted = store.clear_all()
+            print(f"[IndexManager] Удалено {deleted} чанков")
+        else:
+            index_manager.reindex(source_type, source_arg)
 
     def status_fn() -> str:
         return index_manager.status()

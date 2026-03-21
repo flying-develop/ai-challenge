@@ -71,9 +71,10 @@ class AdminCLI:
         Читает команды из stdin до /quit.
         """
         print("🔧 Admin CLI. Команды: /index, /users, /logs, /stats, /quit")
-        print("   /index path ./docs — индексировать локальные .md файлы")
-        print("   /index url https://... — загрузить документацию по URL")
+        print("   /index path ./docs       — индексировать локальные .md файлы")
+        print("   /index url https://...   — загрузить документацию по URL")
         print("   /index github https://... — клонировать и индексировать репо")
+        print("   /index clear             — очистить индекс")
         print()
 
         while True:
@@ -129,6 +130,15 @@ class AdminCLI:
             print(self._status_fn())
             return
 
+        if subcommand == "clear":
+            confirm = input("Удалить весь индекс? (yes/no): ").strip().lower()
+            if confirm == "yes":
+                self._index_fn("clear", "")
+                print("[Admin] Индекс очищен.")
+            else:
+                print("[Admin] Отменено.")
+            return
+
         if len(parts) < 3:
             print(f"Использование: /index {subcommand} <путь или URL>")
             return
@@ -137,7 +147,7 @@ class AdminCLI:
 
         if subcommand not in ("path", "url", "github"):
             print(f"Неизвестный тип источника: {subcommand}")
-            print("Допустимые: path, url, github")
+            print("Допустимые: path, url, github, status, clear")
             return
 
         print(f"[Admin] Запуск индексации: {subcommand} {source_arg}")
@@ -223,6 +233,7 @@ class AdminCLI:
   /index url https://...       — загрузить документацию по URL
   /index github https://...    — клонировать репозиторий, индексировать .md
   /index status                — статус текущего индекса
+  /index clear                 — очистить индекс (с подтверждением)
 
   /users                       — активные пользователи
   /logs [N]                    — последние N запросов (default: 20)
