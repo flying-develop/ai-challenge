@@ -197,9 +197,11 @@ class DialogManager:
 
         sources = []
         if self._last_rag_answer.structured and self._last_rag_answer.structured.sources:
+            # SourceRef: поля file + section
             for src in self._last_rag_answer.structured.sources:
-                sources.append(f"`{src.source}` — {src.section}")
+                sources.append(f"`{src.file}` — {src.section}")
         elif self._last_rag_answer.sources:
+            # RetrievalResult: поля source + section
             for src in self._last_rag_answer.sources[:5]:
                 sources.append(f"`{src.source}` — {src.section}")
 

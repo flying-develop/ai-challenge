@@ -208,18 +208,28 @@ class TelegramListener:
         print(f"[TG] {username} ({chat_id}): {text[:80]}")
 
         try:
+            print(f"[TG]   → поиск в индексе...")
             rag_answer = dialog.process_message(text)
+
+            confidence = getattr(rag_answer, "confidence", 0.0)
+            n_sources = len(getattr(rag_answer, "sources", []))
+            structured = getattr(rag_answer, "structured", None)
+            n_struct_sources = len(structured.sources) if structured else 0
+            print(f"[TG]   → найдено {n_sources} чанков, confidence={confidence:.2f}, "
+                  f"structured_sources={n_struct_sources}")
+
             response_text = _format_rag_answer(rag_answer)
 
             # Сохраняем источники для /sources
             sources = dialog.get_last_sources()
             self.store.set_last_sources(chat_id, sources)
 
+            print(f"[TG]   → отправка ответа ({len(response_text)} симв.)")
             self._send(chat_id, response_text)
+            print(f"[TG]   ✓ готово")
 
             # Логируем если есть колбэк
             if self._log_callback:
-                confidence = getattr(rag_answer, "confidence", 0.0)
                 self._log_callback({
                     "chat_id": chat_id,
                     "username": username,
@@ -228,7 +238,9 @@ class TelegramListener:
                 })
 
         except Exception as exc:
+            import traceback
             print(f"[TG] Ошибка обработки вопроса: {exc}")
+            traceback.print_exc()
             self._send(chat_id, "Произошла ошибка при обработке вопроса. Попробуйте переформулировать.")
 
     def _get_or_create_dialog(self, chat_id: str) -> object:
@@ -288,10 +300,12 @@ def _format_rag_answer(rag_answer) -> str:
         parts.append(f"📋 *Ответ:*\n{clean_answer}")
 
     # Источники
+    # structured.sources — список SourceRef (поля: file, section)
+    # rag_answer.sources — список RetrievalResult (поля: source, section)
     if sources:
         src_lines = []
         for i, src in enumerate(sources[:5], 1):
-            source_name = getattr(src, "source", str(src))
+            source_name = getattr(src, "file", None) or getattr(src, "source", str(src))
             section = getattr(src, "section", "")
             label = f"`{source_name}`"
             if section:
