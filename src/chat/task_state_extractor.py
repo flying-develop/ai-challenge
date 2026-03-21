@@ -20,13 +20,13 @@ from typing import Callable, Optional
 # Промпт для извлечения task state
 TASK_STATE_PROMPT = """Проанализируй диалог и извлеки текущее состояние задачи пользователя.
 Верни ТОЛЬКО валидный JSON, без пояснений, без markdown:
-{{
+{
   "goal": "краткая цель пользователя (1 предложение)",
   "constraints": "выявленные ограничения/параметры (роутер, ОС, провайдер, протокол...)",
   "clarified": "что пользователь уже уточнил",
   "stage": "на каком этапе сейчас (начало / установка / настройка / отладка / решено)",
   "changed": true
-}}
+}
 
 Предыдущее состояние:
 {prev_state}
@@ -108,20 +108,25 @@ class TaskStateExtractor:
         )
         prev_state_text = json.dumps(prev_state or {}, ensure_ascii=False)
 
-        prompt = TASK_STATE_PROMPT.format(
-            prev_state=prev_state_text,
-            recent_messages=messages_text,
-        )
+        # Используем replace вместо .format() — prev_state_text содержит
+        # JSON с фигурными скобками, которые ломают str.format()
+        prompt = (TASK_STATE_PROMPT
+                  .replace("{prev_state}", prev_state_text)
+                  .replace("{recent_messages}", messages_text))
 
         try:
             raw = self.llm_fn("Ты — анализатор диалогов. Отвечай ТОЛЬКО JSON.", prompt)
-            # Ищем JSON в ответе
-            json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
-            if json_match:
-                state = json.loads(json_match.group())
+            # Ищем JSON-объект: ищем первый { и последний } в ответе
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start != -1 and end > start:
+                state = json.loads(raw[start:end])
                 return state
-        except (json.JSONDecodeError, Exception):
-            pass
+            print(f"[TaskState] JSON не найден в ответе: {raw[:200]}")
+        except json.JSONDecodeError as exc:
+            print(f"[TaskState] Ошибка парсинга JSON: {exc} | raw={raw[:200]}")
+        except Exception as exc:
+            print(f"[TaskState] Ошибка LLM: {exc}")
 
         return prev_state or {}
 
