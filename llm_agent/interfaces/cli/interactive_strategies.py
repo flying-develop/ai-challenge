@@ -2031,14 +2031,14 @@ def handle_command(
     if command == "/providers":
         print("\n  Доступные провайдеры:")
         for info in get_available_providers():
-            status = "✓" if info["available"] else "✗ нет ключа"
+            status = "✓" if info["available"] else "✗"
             marker = " ◄ текущий" if info["provider"] == agent.provider_name else ""
             print(
                 f"    [{info['provider']:8}] {info['label']:<28} "
                 f"{status}{marker}"
             )
-            if not info["available"]:
-                print(f"              Нужна переменная: {info['key_var']}")
+            if not info["available"] and info.get("hint"):
+                print(f"              {info['hint']}")
         print()
         return current_strategy_num, True
 
