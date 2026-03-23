@@ -116,14 +116,17 @@ class RAGPipeline:
         top_k: int = 5,
         initial_k: int = 20,
         max_tokens: int | None = None,
+        extra_context: str | None = None,
     ) -> RAGAnswer:
         """Выполнить полный пайплайн и вернуть ответ.
 
         Args:
-            question:  Вопрос пользователя.
-            top_k:     Сколько чанков подать в LLM.
-            initial_k: Сколько кандидатов получить из поиска до реранкинга.
-                       Должен быть > top_k, чтобы реранкеру было из чего выбирать.
+            question:      Вопрос пользователя.
+            top_k:         Сколько чанков подать в LLM.
+            initial_k:     Сколько кандидатов получить из поиска до реранкинга.
+                           Должен быть > top_k, чтобы реранкеру было из чего выбирать.
+            extra_context: Дополнительный контекст (task state из working_memory)
+                           для добавления в system prompt.
         """
         rewrite_variants: list[str] = []
 
@@ -164,7 +167,11 @@ class RAGPipeline:
         if self.use_structured:
             # Структурированный режим: [ANSWER]/[SOURCES]/[QUOTES]
             prompt = self._structured_prompt.build(question, results, confidence)
-            raw_answer = self.llm_fn(prompt.system, prompt.user)
+            # Добавляем extra_context (task state) в system prompt
+            system = prompt.system
+            if extra_context:
+                system = f"{system}\n\nКОНТЕКСТ ТЕКУЩЕЙ ЗАДАЧИ:\n{extra_context}"
+            raw_answer = self.llm_fn(system, prompt.user)
             structured_response = self._response_parser.parse(
                 raw_answer, results, confidence
             )
@@ -173,7 +180,10 @@ class RAGPipeline:
             # Обычный режим (совместимость)
             build_kwargs = {} if max_tokens is None else {"max_tokens": max_tokens}
             ctx = self.query_builder.build(question, results, **build_kwargs)
-            answer_text = self.llm_fn(ctx.system_prompt, ctx.user_prompt)
+            system = ctx.system_prompt
+            if extra_context:
+                system = f"{system}\n\nКОНТЕКСТ ТЕКУЩЕЙ ЗАДАЧИ:\n{extra_context}"
+            answer_text = self.llm_fn(system, ctx.user_prompt)
 
         llm_time_ms = (time.monotonic() - t2) * 1000
 

@@ -128,6 +128,93 @@ def send_progress(chat_id: str, stage: str, message: str) -> str:
 
 
 @mcp.tool()
+def poll_messages(offset: int = 0, timeout: int = 30) -> str:
+    """
+    Получить новые сообщения через Telegram Bot API long-polling.
+
+    Args:
+        offset:  ID последнего обработанного update + 1 (для подтверждения).
+        timeout: Время ожидания новых сообщений в секундах (long-polling).
+
+    Returns:
+        JSON: [{"update_id": N, "chat_id": "...", "text": "...", "username": "..."}, ...]
+        Пустой список если новых сообщений нет.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return json.dumps([])
+
+    url = (
+        f"https://api.telegram.org/bot{token}/getUpdates"
+        f"?offset={offset}&timeout={timeout}&allowed_updates=%5B%22message%22%5D"
+    )
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + 5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"[telegram_server] poll_messages ошибка: {exc}")
+        return json.dumps([])
+
+    if not data.get("ok"):
+        return json.dumps([])
+
+    messages = []
+    for update in data.get("result", []):
+        msg = update.get("message", {})
+        if not msg:
+            continue
+        chat = msg.get("chat", {})
+        from_user = msg.get("from", {})
+        text = msg.get("text", "")
+        if not text:
+            continue
+        messages.append({
+            "update_id": update["update_id"],
+            "chat_id": str(chat.get("id", "")),
+            "text": text,
+            "username": from_user.get("username", "")
+                        or from_user.get("first_name", "unknown"),
+        })
+
+    return json.dumps(messages, ensure_ascii=False)
+
+
+@mcp.tool()
+def send_message(chat_id: str, text: str) -> str:
+    """
+    Отправить сообщение пользователю в Telegram.
+
+    Разбивает длинные сообщения на части (лимит 4096 символов).
+    Если TELEGRAM_BOT_TOKEN не задан — выводит в stdout.
+
+    Args:
+        chat_id: ID чата пользователя (числовой или @username)
+        text:    Текст сообщения (Markdown)
+
+    Returns:
+        Статус отправки
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    parts = _split_text(text)
+
+    if not token:
+        for i, part in enumerate(parts, 1):
+            print(f"[TG_MESSAGE part {i}/{len(parts)}]\n{part}")
+        return f"stdout: {len(parts)} частей"
+
+    if not chat_id:
+        return "Ошибка: chat_id не задан"
+
+    sent = 0
+    for part in parts:
+        if _send_tg_message(chat_id, part, token):
+            sent += 1
+
+    return f"Отправлено {sent}/{len(parts)} частей в {chat_id}"
+
+
+@mcp.tool()
 def send_result(chat_id: str, text: str) -> str:
     """
     Отправить финальный результат в Telegram.
