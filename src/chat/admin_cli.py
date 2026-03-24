@@ -6,6 +6,7 @@
 Команды:
     /index path|url|github ... — индексация документации
     /index status              — статус текущего индекса
+    /mode local|cloud|status   — переключение режима провайдеров
     /users                     — активные пользователи
     /logs [N]                  — последние N запросов
     /stats                     — статистика
@@ -14,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections import deque
@@ -48,11 +50,13 @@ class AdminCLI:
         status_fn: Callable[[], str],
         stop_fn: Callable[[], None],
         log_capacity: int = 100,
+        mode_switch_fn: Callable[[str], str] | None = None,
     ) -> None:
         self.store = session_store
         self._index_fn = index_fn
         self._status_fn = status_fn
         self._stop_fn = stop_fn
+        self._mode_switch_fn = mode_switch_fn
         self._logs: deque[dict] = deque(maxlen=log_capacity)
         self._start_time = time.time()
 
@@ -70,11 +74,16 @@ class AdminCLI:
 
         Читает команды из stdin до /quit.
         """
-        print("🔧 Admin CLI. Команды: /index, /users, /logs, /stats, /quit")
+        current_mode = os.environ.get("LLM_MODE", "cloud").upper()
+        print(f"🔧 Admin CLI. Команды: /index, /mode, /users, /logs, /stats, /quit")
+        print(f"   Режим: {current_mode}")
         print("   /index path ./docs       — индексировать локальные .md файлы")
         print("   /index url https://...   — загрузить документацию по URL")
         print("   /index github https://... — клонировать и индексировать репо")
         print("   /index clear             — очистить индекс")
+        print("   /mode local              — переключить на Ollama (локальный стек)")
+        print("   /mode cloud              — переключить на облачные API")
+        print("   /mode status             — показать текущий режим и провайдеры")
         print()
 
         while True:
@@ -90,6 +99,8 @@ class AdminCLI:
 
             if cmd.startswith("/index"):
                 self._handle_index(cmd)
+            elif cmd.startswith("/mode"):
+                self._handle_mode(cmd)
             elif cmd == "/users":
                 self._show_active_users()
             elif cmd.startswith("/logs"):
@@ -110,6 +121,99 @@ class AdminCLI:
     # ------------------------------------------------------------------
     # Обработчики команд
     # ------------------------------------------------------------------
+
+    def _handle_mode(self, cmd: str) -> None:
+        """Обработать команду /mode.
+
+        Подкоманды:
+            /mode local   — переключить на Ollama (локальный стек)
+            /mode cloud   — переключить на облачные API
+            /mode status  — показать текущий режим и провайдеры
+
+        ВАЖНО: при смене режима эмбеддинги несовместимы — предлагает переиндексировать.
+
+        Args:
+            cmd: Строка команды, например "/mode local"
+        """
+        parts = cmd.split()
+        if len(parts) < 2 or parts[1] not in ("local", "cloud", "status"):
+            print("Использование: /mode local|cloud|status")
+            return
+
+        subcommand = parts[1]
+        current_mode = os.environ.get("LLM_MODE", "cloud").lower()
+
+        if subcommand == "status":
+            self._show_mode_status()
+            return
+
+        if subcommand == current_mode:
+            print(f"[Mode] Уже в режиме {current_mode.upper()}.")
+            return
+
+        # Предупреждение о несовместимости эмбеддингов
+        print(f"[Mode] Переключение: {current_mode.upper()} → {subcommand.upper()}")
+        print("[Mode] ВНИМАНИЕ: эмбеддинги разных моделей несовместимы!")
+        print("[Mode] Нужна переиндексация для корректной работы поиска.")
+        confirm = input("Переиндексировать после переключения? (y/n): ").strip().lower()
+
+        # Устанавливаем новый режим
+        os.environ["LLM_MODE"] = subcommand
+        print(f"[Mode] Режим переключён на {subcommand.upper()}.")
+
+        if self._mode_switch_fn:
+            result = self._mode_switch_fn(subcommand)
+            print(f"[Mode] {result}")
+
+        if confirm == "y":
+            print("[Mode] Запустите переиндексацию:")
+            if subcommand == "local":
+                embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+                print(f"  python rag_indexer/main.py index --docs ./podkop-wiki/content")
+                print(f"  --db ./output/index_local.db --embedder ollama")
+            else:
+                print(f"  python rag_indexer/main.py index --docs ./podkop-wiki/content")
+                print(f"  --db ./output/index.db --embedder qwen")
+        else:
+            print("[Mode] Переиндексация пропущена. Результаты поиска могут быть неточными.")
+
+    def _show_mode_status(self) -> None:
+        """Показать текущий режим и провайдеры."""
+        mode = os.environ.get("LLM_MODE", "cloud").lower()
+        print(f"\n{'─' * 50}")
+        print(f"  Текущий режим: {mode.upper()}")
+        print(f"{'─' * 50}")
+
+        if mode == "local":
+            base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+            embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+            rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+            print(f"  LLM:        Ollama / {llm_model}")
+            print(f"  Embeddings: Ollama / {embed_model}")
+            print(f"  Reranker:   Ollama / {rerank_model}")
+            print(f"  Ollama URL: {base_url}")
+            print(f"  Интернет:   не нужен (кроме Telegram)")
+            print(f"  Стоимость:  0 ₽")
+
+            # Быстрая проверка доступности Ollama
+            import urllib.request as _urllib
+            try:
+                _urllib.urlopen(f"{base_url}/api/tags", timeout=2).read()
+                print(f"  Ollama:     ✅ доступен")
+            except Exception:
+                print(f"  Ollama:     ❌ недоступен (запустите: ollama serve)")
+        else:
+            qwen_key = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+            cohere_key = os.environ.get("COHERE_API_KEY")
+            qwen_model = os.environ.get("QWEN_MODEL", "qwen-plus")
+            print(f"  LLM:        Qwen / {qwen_model}")
+            print(f"  Embeddings: DashScope / text-embedding-v3")
+            print(f"  Reranker:   {'Cohere / rerank-v3.5' if cohere_key else 'ThresholdFilter'}")
+            print(f"  API keys:   QWEN={'✅' if qwen_key else '❌'}  COHERE={'✅' if cohere_key else '❌'}")
+            print(f"  Интернет:   нужен")
+
+        print(f"{'─' * 50}\n")
 
     def _handle_index(self, cmd: str) -> None:
         """Обработать команду /index.
@@ -234,6 +338,10 @@ class AdminCLI:
   /index github https://...    — клонировать репозиторий, индексировать .md
   /index status                — статус текущего индекса
   /index clear                 — очистить индекс (с подтверждением)
+
+  /mode local                  — переключить на Ollama (локальный стек)
+  /mode cloud                  — переключить на облачные API
+  /mode status                 — показать текущий режим и провайдеры
 
   /users                       — активные пользователи
   /logs [N]                    — последние N запросов (default: 20)
