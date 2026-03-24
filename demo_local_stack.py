@@ -57,8 +57,11 @@ def _elapsed(t0: float) -> str:
 # Шаг 1: Health Check
 # ---------------------------------------------------------------------------
 
-def step1_health_check() -> bool:
+def step1_health_check(db_path: Path | None = None) -> bool:
     """Проверить готовность всех компонентов.
+
+    Args:
+        db_path: Путь к SQLite-индексу (передаётся в StackHealthCheck).
 
     Returns:
         True если стек готов, False если есть ошибки.
@@ -66,11 +69,16 @@ def step1_health_check() -> bool:
     _sep("Шаг 1: Health Check")
 
     from src.providers.stack_config import StackHealthCheck
-    checker = StackHealthCheck()
+    checker = StackHealthCheck(db_path=str(db_path) if db_path else None)
     results = checker.check_local()
     checker.print_table(results)
 
     failed = checker.get_failed(results)
+
+    # index и telegram не блокируют: индекс создаётся в шаге 2,
+    # telegram-уведомление отправляется в шаге 6 и обрабатывает отсутствие токена сам.
+    _non_blocking = {"index", "telegram"}
+    blocking_failed = [f for f in failed if f not in _non_blocking]
 
     if failed:
         print("\n[!] Не готовы компоненты:", ", ".join(failed))
@@ -84,21 +92,11 @@ def step1_health_check() -> bool:
             embed = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
             print(f"  → Загрузите модель: ollama pull {embed}")
         if "telegram" in failed:
-            print("  → Добавьте в .env:")
-            print("      TELEGRAM_BOT_TOKEN=ваш_токен")
-            print("      TELEGRAM_CHAT_ID=ваш_chat_id")
+            print("  [!] Telegram: токен не задан — уведомление в шаге 6 будет пропущено")
         if "index" in failed:
             print("  → Индекс будет создан на шаге 2 автоматически")
-            # Отсутствие индекса — не блокирует (шаг 2 создаст)
-            non_index_failed = [f for f in failed if f != "index"]
-            if not non_index_failed:
-                return True
 
-    # Если единственная проблема — индекс, продолжаем
-    if failed == ["index"]:
-        return True
-
-    return len(failed) == 0
+    return len(blocking_failed) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +610,7 @@ def main() -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # --- Шаг 1: Health Check ---
-    health_ok = step1_health_check()
+    health_ok = step1_health_check(db_path)
     print()
 
     if not health_ok:
