@@ -51,9 +51,9 @@ def create_providers(mode: str | None = None) -> dict:
 def _create_local_providers() -> dict:
     """Создать локальные провайдеры через Ollama."""
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
     embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:0.5b")
 
     # LLM через Ollama
     from llm_agent.infrastructure.ollama_client import OllamaHttpClient
@@ -144,7 +144,7 @@ class StackHealthCheck:
         db_path: str | None = None,
     ):
         self.base_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.llm_model = llm_model or os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+        self.llm_model = llm_model or os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
         self.embed_model = embed_model or os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         self.db_path = Path(db_path or os.environ.get("RAG_DB_PATH", "./output/index.db"))
 

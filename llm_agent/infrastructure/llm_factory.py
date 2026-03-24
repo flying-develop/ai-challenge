@@ -6,7 +6,7 @@
     client = build_client("qwen")          # qwen-plus из QWEN_API_KEY
     client = build_client("openai", model="gpt-4o-mini")
     client = build_client("claude", model="claude-haiku-4-5-20251001")
-    client = build_client("ollama")        # qwen2.5:3b локально без ключа
+    client = build_client("ollama")        # qwen2.5:0.5b локально без ключа
 
 Конфигурация (переменные окружения):
     Qwen:
@@ -26,7 +26,7 @@
 
     Ollama (локально, без ключа):
         OLLAMA_BASE_URL — (по умолчанию http://localhost:11434)
-        OLLAMA_MODEL    — (по умолчанию qwen2.5:3b)
+        OLLAMA_MODEL    — (по умолчанию qwen2.5:0.5b)
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ DEFAULT_MODELS: dict[str, str] = {
     "qwen": "qwen-plus",
     "openai": "gpt-4o-mini",
     "claude": "claude-haiku-4-5-20251001",
-    "ollama": "qwen2.5:3b",
+    "ollama": "qwen2.5:0.5b",
 }
 
 # Краткие описания провайдеров

@@ -41,11 +41,13 @@ class OllamaEmbedder(EmbeddingProvider):
         self,
         model: str = "nomic-embed-text",
         base_url: str = "http://localhost:11434",
-        timeout: float = 60.0,
+        timeout: float = 120.0,
+        batch_size: int = 10,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.batch_size = batch_size  # Ollama медленнее DashScope — меньший батч надёжнее
         self._dimension: int | None = None  # определяется при первом вызове
 
     @property
@@ -67,7 +69,8 @@ class OllamaEmbedder(EmbeddingProvider):
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Получить эмбеддинги для списка текстов через Ollama /api/embed.
 
-        Ollama /api/embed принимает список текстов за один запрос (batch).
+        Разбивает список на подбатчи по batch_size (по умолчанию 10),
+        чтобы не превышать таймаут при большом числе текстов.
 
         Args:
             texts: Список строк для эмбеддинга.
@@ -89,6 +92,26 @@ class OllamaEmbedder(EmbeddingProvider):
         if not texts:
             return []
 
+        all_embeddings: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start: start + self.batch_size]
+            batch_embeddings = self._embed_batch(batch)
+            all_embeddings.extend(batch_embeddings)
+
+        return all_embeddings
+
+    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Один HTTP POST запрос к Ollama /api/embed для подбатча.
+
+        Args:
+            texts: Подбатч текстов (не более batch_size).
+
+        Returns:
+            Список векторов.
+
+        Raises:
+            RuntimeError: При HTTP-ошибке или недоступности сервера.
+        """
         body = json.dumps({
             "model": self.model,
             "input": texts,
@@ -152,5 +175,6 @@ class OllamaEmbedder(EmbeddingProvider):
         return (
             f"OllamaEmbedder(model={self.model!r}, "
             f"base_url={self.base_url!r}, "
+            f"batch_size={self.batch_size}, "
             f"dim={self._dimension})"
         )

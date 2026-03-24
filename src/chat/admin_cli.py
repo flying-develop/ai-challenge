@@ -186,9 +186,9 @@ class AdminCLI:
 
         if mode == "local":
             base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+            llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
             embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-            rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+            rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:0.5b")
             print(f"  LLM:        Ollama / {llm_model}")
             print(f"  Embeddings: Ollama / {embed_model}")
             print(f"  Reranker:   Ollama / {rerank_model}")

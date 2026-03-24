@@ -209,7 +209,7 @@ class OllamaReranker(Reranker):
 
     Установка Ollama:
         curl -fsSL https://ollama.com/install.sh | sh
-        ollama pull qwen2.5:3b
+        ollama pull qwen2.5:0.5b
         ollama serve &
     """
 
@@ -224,7 +224,7 @@ class OllamaReranker(Reranker):
 
     def __init__(
         self,
-        model: str = "qwen2.5:3b",
+        model: str = "qwen2.5:0.5b",
         base_url: str = "http://localhost:11434",
     ):
         """

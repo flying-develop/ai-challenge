@@ -14,7 +14,7 @@
 
 Требования:
     ollama serve               # Ollama запущена
-    ollama pull qwen2.5:3b     # LLM и реранкер
+    ollama pull qwen2.5:0.5b     # LLM и реранкер
     ollama pull nomic-embed-text  # Эмбеддинги
 """
 
@@ -77,7 +77,7 @@ def step1_health_check() -> bool:
         if "ollama_server" in failed:
             print("  → Запустите Ollama: ollama serve")
         if "llm_model" in failed:
-            llm = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+            llm = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
             print(f"  → Загрузите модель: ollama pull {llm}")
         if "embed_model" in failed:
             embed = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -188,8 +188,8 @@ def step3_local_rag_query(db_path: Path, question: str) -> dict:
 
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
-    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:0.5b")
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
 
     timings = {}
 
@@ -293,9 +293,9 @@ def step4_compare_local_vs_cloud(db_path: Path, question: str) -> None:
     _sep("Шаг 4: Local vs Cloud")
 
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:3b")
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
     embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:0.5b")
     qwen_model = os.environ.get("QWEN_MODEL", "qwen-plus")
 
     # Local timing
@@ -367,7 +367,7 @@ def step5_three_questions(db_path: Path) -> list[dict]:
 
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:3b")
+    rerank_model = os.environ.get("OLLAMA_RERANK_MODEL", "qwen2.5:0.5b")
 
     from rag_indexer.src.embedding.ollama_embedder import OllamaEmbedder
     from rag_indexer.src.retrieval.reranker import OllamaReranker
