@@ -245,7 +245,7 @@ def step3_local_rag_query(db_path: Path, question: str) -> dict:
     timings["retrieval_start"] = time.time()
 
     try:
-        result = pipeline.query(question)
+        result = pipeline.answer(question)
         timings["total"] = _elapsed(t_total)
 
         print("OK")
@@ -409,7 +409,7 @@ def step5_three_questions(db_path: Path) -> list[dict]:
         print(f"\n  [{level.upper()}] «{question}»")
         t0 = time.time()
         try:
-            result = pipeline.query(question)
+            result = pipeline.answer(question)
             elapsed = _elapsed(t0)
 
             if hasattr(result, "answer"):

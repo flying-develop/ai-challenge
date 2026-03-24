@@ -57,7 +57,7 @@ def _create_local_providers() -> dict:
 
     # LLM через Ollama
     from llm_agent.infrastructure.ollama_client import OllamaHttpClient
-    llm_client = OllamaHttpClient(model=llm_model, base_url=base_url, timeout=120.0)
+    llm_client = OllamaHttpClient(model=llm_model, base_url=base_url, timeout=300.0)
 
     def llm_fn(system: str, user: str) -> str:
         from llm_agent.domain.models import ChatMessage
