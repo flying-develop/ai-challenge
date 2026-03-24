@@ -289,10 +289,8 @@ class StackHealthCheck:
             "llm_test": "Тест генерации",
             "embed_test": "Тест эмбеддинга",
             "index": "Индекс",
-            "telegram": "Telegram (опц.)",
+            "telegram": "Telegram",
         }
-        # Опциональные проверки — не влияют на итог
-        _optional = {"telegram"}
 
         print("┌" + "─" * 44 + "┐")
         print("│  Stack Health Check (LOCAL mode)           │")
@@ -301,11 +299,11 @@ class StackHealthCheck:
         all_ok = True
         for key, label in labels.items():
             r = results.get(key, {"ok": False, "detail": "?"})
-            icon = "✅" if r["ok"] else ("⚠️ " if key in _optional else "❌")
-            if not r["ok"] and key not in _optional:
+            icon = "✅" if r["ok"] else "❌"
+            if not r["ok"]:
                 all_ok = False
             detail = r["detail"][:17]
-            print(f"│ {label:<22} │ {icon}{detail:<16} │")
+            print(f"│ {label:<22} │ {icon} {detail:<16} │")
 
         print("└" + "─" * 24 + "┴" + "─" * 19 + "┘")
 

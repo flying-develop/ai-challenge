@@ -37,6 +37,10 @@ class OllamaEmbedder(EmbeddingProvider):
         timeout:  Таймаут HTTP-запроса в секундах (по умолчанию 60).
     """
 
+    # nomic-embed-text контекст: 8192 токенов ≈ 30 000 символов.
+    # Берём с запасом 8000 символов — безопасный предел для большинства моделей.
+    _MAX_CHARS = 8000
+
     def __init__(
         self,
         model: str = "nomic-embed-text",
@@ -103,6 +107,9 @@ class OllamaEmbedder(EmbeddingProvider):
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Один HTTP POST запрос к Ollama /api/embed для подбатча.
 
+        Тексты обрезаются до _MAX_CHARS перед отправкой, чтобы не превысить
+        контекст модели (HTTP 400: input length exceeds context length).
+
         Args:
             texts: Подбатч текстов (не более batch_size).
 
@@ -112,9 +119,12 @@ class OllamaEmbedder(EmbeddingProvider):
         Raises:
             RuntimeError: При HTTP-ошибке или недоступности сервера.
         """
+        # Обрезаем тексты, превышающие контекст модели
+        safe_texts = [t[: self._MAX_CHARS] for t in texts]
+
         body = json.dumps({
             "model": self.model,
-            "input": texts,
+            "input": safe_texts,
         }).encode("utf-8")
 
         req = urllib.request.Request(

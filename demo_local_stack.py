@@ -70,11 +70,7 @@ def step1_health_check() -> bool:
     results = checker.check_local()
     checker.print_table(results)
 
-    # Telegram — опциональный для демо (нужен только для бота)
-    _OPTIONAL = {"telegram"}
-
     failed = checker.get_failed(results)
-    critical_failed = [f for f in failed if f not in _OPTIONAL]
 
     if failed:
         print("\n[!] Не готовы компоненты:", ", ".join(failed))
@@ -88,17 +84,21 @@ def step1_health_check() -> bool:
             embed = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
             print(f"  → Загрузите модель: ollama pull {embed}")
         if "telegram" in failed:
-            print("  → Telegram опционален для демо. Для бота: добавьте TELEGRAM_BOT_TOKEN в .env")
+            print("  → Добавьте в .env:")
+            print("      TELEGRAM_BOT_TOKEN=ваш_токен")
+            print("      TELEGRAM_CHAT_ID=ваш_chat_id")
         if "index" in failed:
-            print("  → Запустите индексацию (Шаг 2 продолжит автоматически)")
+            print("  → Индекс будет создан на шаге 2 автоматически")
+            # Отсутствие индекса — не блокирует (шаг 2 создаст)
+            non_index_failed = [f for f in failed if f != "index"]
+            if not non_index_failed:
+                return True
 
-    if critical_failed:
-        # Если только индекс — продолжаем (шаг 2 проиндексирует)
-        if critical_failed == ["index"]:
-            return True
-        return False
+    # Если единственная проблема — индекс, продолжаем
+    if failed == ["index"]:
+        return True
 
-    return True
+    return len(failed) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +447,7 @@ def print_final_report(health_ok: bool, index_ok: bool, rag_result: dict, questi
     """Вывести итоговый отчёт по всем тестам."""
     _sep("Итоговый отчёт: Local Stack Integration")
 
+
     rows = [
         ("Health check",       health_ok,          "7/7 OK" if health_ok else "ошибки"),
         ("Local indexing",     index_ok,            "OK" if index_ok else "пропущено"),
@@ -482,10 +483,118 @@ def print_final_report(health_ok: bool, index_ok: bool, rag_result: dict, questi
     else:
         print("  ⚠️  Некоторые тесты не прошли. Проверьте вывод выше.")
 
+    return {"passed": passed, "total": total, "rows": rows}
+
 
 # ---------------------------------------------------------------------------
 # Главная функция
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Шаг 6: Telegram-уведомление
+# ---------------------------------------------------------------------------
+
+def step6_telegram_notify(report: dict, rag_result: dict, questions: list[dict]) -> bool:
+    """Отправить итоговое уведомление в Telegram-чат.
+
+    Демонстрирует, что локальный стек работает: RAG-ответ на вопрос
+    был получен полностью через Ollama и доставлен в Telegram.
+
+    Args:
+        report:    Словарь от print_final_report() с passed/total/rows.
+        rag_result: Результат RAG-запроса из шага 3.
+        questions:  Результаты трёх вопросов из шага 5.
+
+    Returns:
+        True если сообщение отправлено успешно.
+    """
+    _sep("Шаг 6: Telegram уведомление")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token or token == "your_bot_token_here":
+        print("[SKIP] TELEGRAM_BOT_TOKEN не задан — отправка пропущена.")
+        print("  Добавьте в .env: TELEGRAM_BOT_TOKEN=ваш_токен")
+        return False
+
+    if not chat_id or chat_id == "123456789":
+        print("[SKIP] TELEGRAM_CHAT_ID не задан — отправка пропущена.")
+        print("  Добавьте в .env: TELEGRAM_CHAT_ID=ваш_chat_id")
+        return False
+
+    passed = report.get("passed", 0)
+    total = report.get("total", 0)
+    all_ok = passed == total
+
+    # Краткий ответ на первый вопрос для демонстрации RAG
+    rag_answer = ""
+    if rag_result.get("ok") and rag_result.get("answer"):
+        raw = str(rag_result["answer"])
+        # Берём первые 300 символов ответа
+        rag_answer = raw[:300] + ("..." if len(raw) > 300 else "")
+
+    # Тайминги по вопросам
+    q_lines = []
+    for q in questions:
+        icon = "✅" if q["ok"] else "❌"
+        q_lines.append(
+            f"  {icon} [{q['level'].upper()}] {q['question'][:40]} — {q.get('elapsed', '?')}"
+        )
+
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
+    embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
+    status_icon = "🎉" if all_ok else "⚠️"
+    text = (
+        f"{status_icon} *День 27: Local Stack Demo — {passed}/{total} тестов*\n"
+        f"\n"
+        f"🖥 Стек: полностью локальный (без облачных API)\n"
+        f"  • LLM: `{llm_model}`\n"
+        f"  • Embeddings: `{embed_model}`\n"
+        f"  • Reranker: Ollama\n"
+        f"\n"
+        f"📝 *RAG-ответ на вопрос «Как установить podkop?»:*\n"
+        f"{rag_answer}\n"
+        f"\n"
+        f"❓ *Три вопроса по документации:*\n"
+        + "\n".join(q_lines) +
+        f"\n\n"
+        f"_Все ответы сгенерированы локально. Интернет использован только для этого сообщения._"
+    )
+
+    print(f"[>] Отправка уведомления в чат {chat_id}...")
+
+    import urllib.request as _req
+    import json as _json
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = _json.dumps({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }).encode("utf-8")
+
+    req = _req.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with _req.urlopen(req, timeout=15) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            print("[OK] Уведомление отправлено в Telegram!")
+            return True
+        else:
+            print(f"[ERROR] Telegram API вернул: {result}")
+            return False
+    except Exception as exc:
+        print(f"[ERROR] Не удалось отправить: {exc}")
+        return False
+
 
 def main() -> None:
     """Запустить демонстрацию локального стека."""
@@ -531,7 +640,11 @@ def main() -> None:
     print()
 
     # --- Итоговый отчёт ---
-    print_final_report(health_ok, index_ok, rag_result, questions)
+    report = print_final_report(health_ok, index_ok, rag_result, questions)
+
+    # --- Шаг 6: Telegram уведомление ---
+    print()
+    step6_telegram_notify(report or {}, rag_result, questions)
 
 
 if __name__ == "__main__":
