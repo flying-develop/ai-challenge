@@ -289,8 +289,10 @@ class StackHealthCheck:
             "llm_test": "Тест генерации",
             "embed_test": "Тест эмбеддинга",
             "index": "Индекс",
-            "telegram": "Telegram",
+            "telegram": "Telegram (опц.)",
         }
+        # Опциональные проверки — не влияют на итог
+        _optional = {"telegram"}
 
         print("┌" + "─" * 44 + "┐")
         print("│  Stack Health Check (LOCAL mode)           │")
@@ -299,11 +301,11 @@ class StackHealthCheck:
         all_ok = True
         for key, label in labels.items():
             r = results.get(key, {"ok": False, "detail": "?"})
-            icon = "✅" if r["ok"] else "❌"
-            if not r["ok"]:
+            icon = "✅" if r["ok"] else ("⚠️ " if key in _optional else "❌")
+            if not r["ok"] and key not in _optional:
                 all_ok = False
             detail = r["detail"][:17]
-            print(f"│ {label:<22} │ {icon} {detail:<16} │")
+            print(f"│ {label:<22} │ {icon}{detail:<16} │")
 
         print("└" + "─" * 24 + "┴" + "─" * 19 + "┘")
 
@@ -312,13 +314,18 @@ class StackHealthCheck:
         else:
             print("\n❌ Некоторые компоненты недоступны. Исправьте ошибки выше.")
 
-    def get_failed(self, results: dict) -> list[str]:
+    def get_failed(self, results: dict, skip_optional: bool = False) -> list[str]:
         """Получить список неуспешных проверок.
 
         Args:
-            results: Словарь от check_local().
+            results:         Словарь от check_local().
+            skip_optional:   Если True — исключает опциональные проверки (telegram).
 
         Returns:
             Список ключей с ok=False.
         """
-        return [k for k, v in results.items() if not v.get("ok", False)]
+        _optional = {"telegram"}
+        return [
+            k for k, v in results.items()
+            if not v.get("ok", False) and (not skip_optional or k not in _optional)
+        ]

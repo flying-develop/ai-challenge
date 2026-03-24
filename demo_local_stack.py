@@ -70,7 +70,12 @@ def step1_health_check() -> bool:
     results = checker.check_local()
     checker.print_table(results)
 
+    # Telegram — опциональный для демо (нужен только для бота)
+    _OPTIONAL = {"telegram"}
+
     failed = checker.get_failed(results)
+    critical_failed = [f for f in failed if f not in _OPTIONAL]
+
     if failed:
         print("\n[!] Не готовы компоненты:", ", ".join(failed))
         print("\nИнструкции:")
@@ -82,9 +87,15 @@ def step1_health_check() -> bool:
         if "embed_model" in failed:
             embed = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
             print(f"  → Загрузите модель: ollama pull {embed}")
+        if "telegram" in failed:
+            print("  → Telegram опционален для демо. Для бота: добавьте TELEGRAM_BOT_TOKEN в .env")
         if "index" in failed:
             print("  → Запустите индексацию (Шаг 2 продолжит автоматически)")
-            return True  # Разрешаем продолжить для индексации
+
+    if critical_failed:
+        # Если только индекс — продолжаем (шаг 2 проиндексирует)
+        if critical_failed == ["index"]:
+            return True
         return False
 
     return True
