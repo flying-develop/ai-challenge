@@ -21,7 +21,7 @@ from .embedding.provider import EmbeddingProvider
 from .loader import DocumentLoader, Document
 from .storage.index_store import IndexStore
 
-_BATCH_SIZE = 25  # Батч для эмбеддингов (ограничение DashScope)
+_BATCH_SIZE = 10  # Батч для эмбеддингов (уменьшен для стабильности API)
 
 
 # ---------------------------------------------------------------------------

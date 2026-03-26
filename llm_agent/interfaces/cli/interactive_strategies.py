@@ -252,6 +252,8 @@ RAG-ПОИСК (документы podkop-wiki):
   /rag eval                — прогнать 10 вопросов по всем доступным конфигурациям
   /rag eval full           — полный прогон: 10 вопросов + 3 антивопроса с цитатами
   /rag compare             — сравнительная таблица последнего eval (см. /rag eval)
+  /rag benchmark           — сравнение local vs cloud (10 вопр + антивопр + стабильность)
+  /rag benchmark quick     — быстрый бенчмарк (3 вопроса)
 
   Прямой поиск:
   /rag search "<запрос>"  — найти релевантные чанки из индекса
@@ -1667,15 +1669,176 @@ def _handle_rag_command(parts: list[str], rag_state: dict) -> str:
         except Exception as exc:
             return f"Ошибка: {exc}"
 
+    elif sub == "benchmark":
+        quick = (len(parts) > 2 and parts[2] == "quick")
+        return _handle_rag_benchmark(rag_state, quick=quick)
+
     else:
         return (
-            "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare]\n"
+            "Использование: /rag [off|vector|bm25|hybrid|status|eval|search|stats|compare|benchmark]\n"
             "  Реранкинг: /rag rerank [none|threshold|cohere|ollama]\n"
             "  Rewrite:   /rag rewrite [on|off]\n"
             "  Цитаты:    /rag citations [on|off]\n"
             "  Данные:    /rag confidence | /rag verify\n"
-            "  Оценка:    /rag eval | /rag eval full"
+            "  Оценка:    /rag eval | /rag eval full\n"
+            "  Бенчмарк:  /rag benchmark [quick]"
         )
+
+
+def _handle_rag_benchmark(rag_state: dict, quick: bool = False) -> str:
+    """Запустить сравнительный бенчмарк local vs cloud стеков.
+
+    Строит два отдельных RAGPipeline (из index_local.db и index_cloud.db),
+    прогоняет набор вопросов и выводит пять сравнительных таблиц.
+
+    Args:
+        rag_state: Словарь состояния RAG из основного цикла.
+        quick:     True — только 3 вопроса (быстрая проверка).
+
+    Returns:
+        Пустая строка (всё выводится через print).
+    """
+    import sys as _sys
+    import os
+
+    db_path = rag_state.get("db_path", "")
+    if not db_path:
+        return "RAG не инициализирован. Задайте RAG_DB_PATH в .env."
+
+    # rag_indexer/ — один уровень выше output/
+    db_dir  = os.path.dirname(os.path.abspath(db_path))
+    rag_dir = os.path.normpath(os.path.join(db_dir, ".."))
+    if rag_dir not in _sys.path:
+        _sys.path.insert(0, rag_dir)
+
+    # Пути к двум индексам
+    local_db = os.path.join(db_dir, "index_local.db")
+    cloud_db = os.path.join(db_dir, "index_cloud.db")
+
+    try:
+        from src.retrieval.benchmark import RAGBenchmark
+        from src.retrieval.pipeline import RAGPipeline
+        from src.retrieval.retriever import HybridRetriever, VectorRetriever, BM25Retriever
+        from src.storage.index_store import IndexStore
+    except ImportError as exc:
+        return f"Ошибка импорта benchmark: {exc}"
+
+    mode_label = "quick (3 вопроса)" if quick else "full (10 вопросов + антивопросы + стабильность)"
+    print(f"\n  /rag benchmark — режим: {mode_label}")
+    print(f"  local db : {local_db}")
+    print(f"  cloud db : {cloud_db}\n")
+
+    # ---- Local pipeline -----------------------------------------------
+    local_pipeline = None
+    if os.path.exists(local_db):
+        print("  [>] Инициализация local pipeline...", end=" ", flush=True)
+        try:
+            from src.embedding.ollama_embedder import OllamaEmbedder
+            from src.retrieval.reranker import OllamaReranker
+
+            base_url     = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+            embed_model  = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+            rerank_model = os.environ.get(
+                "OLLAMA_RERANK_MODEL",
+                os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b"),
+            )
+            llm_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
+
+            embedder  = OllamaEmbedder(model=embed_model, base_url=base_url)
+            reranker  = OllamaReranker(model=rerank_model, base_url=base_url)
+            store     = IndexStore(local_db)
+            retriever = HybridRetriever(
+                vector_retriever=VectorRetriever(store=store, embedder=embedder),
+                bm25_retriever=BM25Retriever(store=store),
+            )
+
+            from llm_agent.infrastructure.ollama_client import OllamaHttpClient
+            _llm_client = OllamaHttpClient(model=llm_model, base_url=base_url, timeout=300.0)
+
+            def _local_llm_fn(system: str, user: str) -> str:
+                from llm_agent.domain.models import ChatMessage
+                msgs = []
+                if system:
+                    msgs.append(ChatMessage(role="system", content=system))
+                msgs.append(ChatMessage(role="user", content=user))
+                return _llm_client.generate(msgs).text
+
+            local_pipeline = RAGPipeline(
+                retriever=retriever,
+                llm_fn=_local_llm_fn,
+                reranker=reranker,
+                use_structured=True,
+            )
+            print("OK")
+        except Exception as exc:
+            print(f"❌ {exc}")
+    else:
+        print(f"  ⚠️  index_local.db не найден: {local_db}")
+        print(
+            "  Создайте: cd rag_indexer && "
+            "python main.py index --docs ../podkop-wiki/content "
+            "--db output/index_local.db --embedder ollama"
+        )
+
+    # ---- Cloud pipeline -----------------------------------------------
+    cloud_pipeline = None
+    qwen_key = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+    if os.path.exists(cloud_db) and qwen_key:
+        print("  [>] Инициализация cloud pipeline...", end=" ", flush=True)
+        try:
+            from src.embedding.provider import EmbeddingProvider
+            from src.retrieval.reranker import CohereReranker, ThresholdFilter
+
+            qwen_api_key = os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
+            embedder  = EmbeddingProvider.create("qwen", api_key=qwen_api_key)
+            store     = IndexStore(cloud_db)
+            retriever = HybridRetriever(
+                vector_retriever=VectorRetriever(store=store, embedder=embedder),
+                bm25_retriever=BM25Retriever(store=store),
+            )
+
+            cohere_key = os.environ.get("COHERE_API_KEY", "")
+            reranker   = CohereReranker() if cohere_key else ThresholdFilter(threshold=0.0)
+
+            # Используем llm_fn агента (уже облачный провайдер)
+            cloud_llm_fn = rag_state.get("llm_fn")
+            if cloud_llm_fn is None:
+                return (
+                    "Для cloud pipeline нужен LLM. "
+                    "Введите /rag hybrid сначала (инициализирует llm_fn)."
+                )
+
+            cloud_pipeline = RAGPipeline(
+                retriever=retriever,
+                llm_fn=cloud_llm_fn,
+                reranker=reranker,
+                use_structured=True,
+            )
+            print("OK")
+        except Exception as exc:
+            print(f"❌ {exc}")
+    elif not os.path.exists(cloud_db):
+        print(f"  ⚠️  index_cloud.db не найден: {cloud_db}")
+        print(
+            "  Создайте: cd rag_indexer && "
+            "python main.py index --docs ../podkop-wiki/content "
+            "--db output/index_cloud.db --embedder qwen"
+        )
+    elif not qwen_key:
+        print("  ⚠️  QWEN_API_KEY / DASHSCOPE_API_KEY не задан — cloud стек пропущен.")
+
+    if local_pipeline is None and cloud_pipeline is None:
+        return "\nНи один пайплайн не создан. Проверьте конфигурацию."
+
+    # ---- Запуск бенчмарка ---------------------------------------------
+    benchmark = RAGBenchmark(
+        local_pipeline=local_pipeline,
+        cloud_pipeline=cloud_pipeline,
+    )
+    results, anti_results, stability_results = benchmark.run(quick=quick)
+    benchmark.print_all_tables(results, anti_results, stability_results)
+    benchmark.print_conclusions(results, anti_results, stability_results)
+    return ""
 
 
 def _handle_research_command(parts: list[str], mcp_state: dict) -> None:
