@@ -9,7 +9,7 @@
 Пример использования:
     from llm_agent.infrastructure.ollama_client import OllamaHttpClient
 
-    client = OllamaHttpClient(model="qwen2.5:0.5b")
+    client = OllamaHttpClient(model="qwen2.5:1.5b")
     if not client.is_available():
         print("Запустите Ollama: ollama serve")
     else:
@@ -34,21 +34,31 @@ class OllamaHttpClient:
     и многоходовую историю диалога. stream: false — синхронный ответ.
 
     Таймаут 120с: локальная модель может генерировать медленнее облачных.
+
+    Args:
+        model:    Имя модели в Ollama (например, "qwen2.5:1.5b").
+        base_url: Адрес Ollama сервера.
+        timeout:  Таймаут HTTP-запроса в секундах.
+        options:  Параметры генерации для /api/chat options
+                  (temperature, num_ctx, num_predict, top_p, seed и др.).
+                  Если None — Ollama использует параметры по умолчанию.
     """
 
     def __init__(
         self,
-        model: str = "qwen2.5:0.5b",
+        model: str = "qwen2.5:1.5b",
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
+        options: dict | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._options = options or {}
 
     @property
     def context_limit(self) -> int:
-        """Контекст qwen2.5:0.5b — 32k, для агента ограничиваем консервативно."""
+        """Контекст qwen2.5:1.5b — 32k, для агента ограничиваем консервативно."""
         return 4096
 
     def generate(self, messages: list[ChatMessage]) -> LLMResponse:
@@ -72,11 +82,15 @@ class OllamaHttpClient:
             for msg in messages
         ]
 
-        body = json.dumps({
+        payload: dict = {
             "model": self._model,
             "messages": payload_messages,
             "stream": False,
-        }).encode("utf-8")
+        }
+        if self._options:
+            payload["options"] = self._options
+
+        body = json.dumps(payload).encode("utf-8")
 
         req = urllib.request.Request(
             f"{self._base_url}/api/chat",
@@ -126,7 +140,7 @@ class OllamaHttpClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
-            # Ollama хранит имена как "qwen2.5:0.5b" или "qwen2.5:0.5b:latest"
+            # Ollama хранит имена как "qwen2.5:1.5b" или "qwen2.5:1.5b:latest"
             return self._model in models or f"{self._model}:latest" in models
         except Exception:
             return False
