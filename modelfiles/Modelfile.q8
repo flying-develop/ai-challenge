@@ -9,16 +9,16 @@
 #   - Есть достаточно RAM (>= 2 GB для 0.5b)
 #   - Качество важнее скорости
 #
-# Создание модели (квантизация из fp16 блоба):
-#   ollama create qwen2.5-q8 -f modelfiles/Modelfile.q8
+# Подготовка (скачать квантизированную модель):
+#   ollama pull qwen2.5:2b-instruct-q8_0
 #
-# Альтернативный способ (если поддерживается вашей версией Ollama):
-#   ollama create qwen2.5-q8 --quantize q8_0 -f modelfiles/Modelfile.q8
+# Создание RAG-обёртки поверх неё:
+#   ollama create qwen2.5-q8 -f modelfiles/Modelfile.q8
 #
 # Проверка:
 #   ollama run qwen2.5-q8 "Как установить podkop?"
 
-FROM qwen2.5:0.5b
+FROM qwen2.5:2b-instruct-q8_0
 
 # Параметры такие же как в Modelfile.rag для честного сравнения
 PARAMETER temperature 0.2

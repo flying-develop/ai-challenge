@@ -12,7 +12,7 @@
 # Проверка:
 #   ollama run qwen2.5-rag "Как установить podkop?"
 
-FROM qwen2.5:0.5b
+FROM qwen2.5:2b
 
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9

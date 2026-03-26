@@ -343,10 +343,16 @@ def step3_quantization(
     _sep("Шаг 3: Квантизация")
 
     # Модели квантизации: имя_в_ollama → метка
+    # qwen2.5:2b — дефолтная Q4_K_M
+    # qwen2.5:2b-instruct-q8_0 / q4_0 — скачиваются через ollama pull
+    # qwen2.5-q8 / q4 — RAG-обёртки через ollama create -f modelfiles/Modelfile.q*
+    base_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:2b")
     quant_models = [
-        (os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b"), "Q4_K_M (baseline)"),
-        ("qwen2.5-q8",                                         "Q8_0"),
-        ("qwen2.5-q4",                                         "Q4_0"),
+        (base_model,                    "Q4_K_M (baseline)"),
+        ("qwen2.5:2b-instruct-q8_0",   "Q8_0 (pull)"),
+        ("qwen2.5-q8",                  "Q8_0 (Modelfile)"),
+        ("qwen2.5:2b-instruct-q4_0",   "Q4_0 (pull)"),
+        ("qwen2.5-q4",                  "Q4_0 (Modelfile)"),
     ]
 
     # Параметры RAG-оптимизированные для честного сравнения

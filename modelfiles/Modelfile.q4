@@ -12,13 +12,16 @@
 #   - Нужна максимальная скорость
 #   - Для тестирования нижней границы качества
 #
-# Создание модели:
+# Подготовка (скачать квантизированную модель):
+#   ollama pull qwen2.5:2b-instruct-q4_0
+#
+# Создание RAG-обёртки поверх неё:
 #   ollama create qwen2.5-q4 -f modelfiles/Modelfile.q4
 #
 # Проверка:
 #   ollama run qwen2.5-q4 "Как установить podkop?"
 
-FROM qwen2.5:0.5b
+FROM qwen2.5:2b-instruct-q4_0
 
 # Параметры такие же как в Modelfile.rag для честного сравнения
 PARAMETER temperature 0.2
