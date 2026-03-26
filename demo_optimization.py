@@ -343,15 +343,15 @@ def step3_quantization(
     _sep("Шаг 3: Квантизация")
 
     # Модели квантизации: имя_в_ollama → метка
-    # qwen2.5:2b — дефолтная Q4_K_M
-    # qwen2.5:2b-instruct-q8_0 / q4_0 — скачиваются через ollama pull
+    # qwen2.5:1.5b — дефолтная Q4_K_M
+    # qwen2.5:1.5b-q8_0 / q4_0 — скачиваются через ollama pull
     # qwen2.5-q8 / q4 — RAG-обёртки через ollama create -f modelfiles/Modelfile.q*
-    base_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:2b")
+    base_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
     quant_models = [
         (base_model,                    "Q4_K_M (baseline)"),
-        ("qwen2.5:2b-instruct-q8_0",   "Q8_0 (pull)"),
+        ("qwen2.5:1.5b-q8_0",   "Q8_0 (pull)"),
         ("qwen2.5-q8",                  "Q8_0 (Modelfile)"),
-        ("qwen2.5:2b-instruct-q4_0",   "Q4_0 (pull)"),
+        ("qwen2.5:1.5b-q4_0",   "Q4_0 (pull)"),
         ("qwen2.5-q4",                  "Q4_0 (Modelfile)"),
     ]
 
@@ -388,7 +388,7 @@ def step4_prompt_template(
 ) -> dict[str, list[OptResult]]:
     _sep("Шаг 4: Промпт-шаблон")
 
-    base_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
+    base_model = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
     rag_model  = "qwen2.5-rag"  # создан из Modelfile.rag
 
     from src.providers.ollama_config import CONFIGS
@@ -623,7 +623,7 @@ def step6_conclusions(
         print(f"\n  Лучший результат по keyword_hit: [{best_overall}] = {best_score_overall:.0%}")
 
     print("""
-  Для production support-бота на qwen2.5:0.5b рекомендуется:
+  Для production support-бота на qwen2.5:1.5b рекомендуется:
     1. Параметры: rag_tuned (temp=0.2, seed=42, ctx=3072, predict=400)
        — детерминированные ответы, достаточный контекст для [ANSWER]/[SOURCES]/[QUOTES]
     2. Квантизация: Q8_0 если RAM позволяет, Q4_K_M (baseline) как компромисс
@@ -645,7 +645,7 @@ def main(quick: bool = False) -> None:
     print()
 
     base_url    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    llm_model   = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")
+    llm_model   = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
     embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
     output_dir = _PROJECT_ROOT / "rag_indexer" / "output"

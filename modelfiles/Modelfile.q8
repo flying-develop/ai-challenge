@@ -1,4 +1,4 @@
-# Modelfile.q8 — qwen2.5:0.5b с квантизацией Q8_0
+# Modelfile.q8 — qwen2.5:1.5b с квантизацией Q8_0
 #
 # Q8_0: 8-битная квантизация весов.
 #   + Лучше качество ответов, чем Q4_K_M (baseline)
@@ -10,7 +10,7 @@
 #   - Качество важнее скорости
 #
 # Подготовка (скачать квантизированную модель):
-#   ollama pull qwen2.5:2b-instruct-q8_0
+#   ollama pull qwen2.5:1.5b-q8_0
 #
 # Создание RAG-обёртки поверх неё:
 #   ollama create qwen2.5-q8 -f modelfiles/Modelfile.q8
@@ -18,7 +18,7 @@
 # Проверка:
 #   ollama run qwen2.5-q8 "Как установить podkop?"
 
-FROM qwen2.5:2b-instruct-q8_0
+FROM qwen2.5:1.5b-q8_0
 
 # Параметры такие же как в Modelfile.rag для честного сравнения
 PARAMETER temperature 0.2

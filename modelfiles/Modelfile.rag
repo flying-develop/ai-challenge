@@ -1,4 +1,4 @@
-# Modelfile.rag — RAG support-бот на базе qwen2.5:0.5b
+# Modelfile.rag — RAG support-бот на базе qwen2.5:1.5b
 #
 # Параметры оптимизированы для structured RAG-ответов:
 #   - Низкая температура → детерминированность, точность
@@ -12,7 +12,7 @@
 # Проверка:
 #   ollama run qwen2.5-rag "Как установить podkop?"
 
-FROM qwen2.5:2b
+FROM qwen2.5:1.5b
 
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9

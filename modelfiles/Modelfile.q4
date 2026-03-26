@@ -1,4 +1,4 @@
-# Modelfile.q4 — qwen2.5:0.5b с квантизацией Q4_0
+# Modelfile.q4 — qwen2.5:1.5b с квантизацией Q4_0
 #
 # Q4_0: 4-битная квантизация без K-means (агрессивная).
 #   + Меньше памяти и быстрее, чем Q4_K_M (baseline)
@@ -13,7 +13,7 @@
 #   - Для тестирования нижней границы качества
 #
 # Подготовка (скачать квантизированную модель):
-#   ollama pull qwen2.5:2b-instruct-q4_0
+#   ollama pull qwen2.5:1.5b-q4_0
 #
 # Создание RAG-обёртки поверх неё:
 #   ollama create qwen2.5-q4 -f modelfiles/Modelfile.q4
@@ -21,7 +21,7 @@
 # Проверка:
 #   ollama run qwen2.5-q4 "Как установить podkop?"
 
-FROM qwen2.5:2b-instruct-q4_0
+FROM qwen2.5:1.5b-q4_0
 
 # Параметры такие же как в Modelfile.rag для честного сравнения
 PARAMETER temperature 0.2
