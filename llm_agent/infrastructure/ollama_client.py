@@ -9,7 +9,7 @@
 Пример использования:
     from llm_agent.infrastructure.ollama_client import OllamaHttpClient
 
-    client = OllamaHttpClient(model="qwen2.5:3b")
+    client = OllamaHttpClient(model="qwen2.5:0.5b")
     if not client.is_available():
         print("Запустите Ollama: ollama serve")
     else:
@@ -38,7 +38,7 @@ class OllamaHttpClient:
 
     def __init__(
         self,
-        model: str = "qwen2.5:3b",
+        model: str = "qwen2.5:0.5b",
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
     ) -> None:
@@ -48,7 +48,7 @@ class OllamaHttpClient:
 
     @property
     def context_limit(self) -> int:
-        """Контекст qwen2.5:3b — 32k, для агента ограничиваем консервативно."""
+        """Контекст qwen2.5:0.5b — 32k, для агента ограничиваем консервативно."""
         return 4096
 
     def generate(self, messages: list[ChatMessage]) -> LLMResponse:
@@ -126,7 +126,7 @@ class OllamaHttpClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
-            # Ollama хранит имена как "qwen2.5:3b" или "qwen2.5:3b:latest"
+            # Ollama хранит имена как "qwen2.5:0.5b" или "qwen2.5:0.5b:latest"
             return self._model in models or f"{self._model}:latest" in models
         except Exception:
             return False

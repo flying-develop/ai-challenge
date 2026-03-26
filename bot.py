@@ -11,11 +11,17 @@
     DASHSCOPE_API_KEY    — API ключ для эмбеддингов (Qwen)
     CHAT_HISTORY_LIMIT   — размер sliding window (default: 20)
     CHAT_INTERFACE       — cli | telegram | both (default: both)
+    LLM_MODE             — local | cloud (default: cloud)
+    OLLAMA_BASE_URL      — URL сервера Ollama (default: http://localhost:11434)
+    OLLAMA_LLM_MODEL     — модель LLM для Ollama (default: qwen2.5:3b)
+    OLLAMA_EMBED_MODEL   — модель эмбеддингов для Ollama (default: nomic-embed-text)
+    OLLAMA_RERANK_MODEL  — модель реранкера для Ollama (default: qwen2.5:3b)
 
 Запуск:
     python bot.py
-    python bot.py --no-telegram   # только AdminCLI (без Telegram)
-    python bot.py --no-cli        # только Telegram (daemon)
+    LLM_MODE=local python bot.py    # полностью локальный режим
+    python bot.py --no-telegram     # только AdminCLI (без Telegram)
+    python bot.py --no-cli          # только Telegram (daemon)
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ from src.indexer import IndexManager, _create_source
 _DB_PATH = Path("./output/index.db")
 _MEMORY_DB_PATH = Path("./output/memory_{user_id}.db")
 _CHAT_INTERFACE = os.environ.get("CHAT_INTERFACE", "both")
+_LLM_MODE = os.environ.get("LLM_MODE", "cloud").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +72,40 @@ _CHAT_INTERFACE = os.environ.get("CHAT_INTERFACE", "both")
 # ---------------------------------------------------------------------------
 
 def _build_llm_fn():
-    """Построить функцию LLM из доступного провайдера."""
+    """Построить функцию LLM из доступного провайдера.
+
+    LLM_MODE=local  → Ollama (qwen2.5:3b, без API-ключей)
+    LLM_MODE=cloud  → облачный провайдер (Qwen/OpenAI)
+    """
+    if _LLM_MODE == "local":
+        from src.providers.stack_config import create_providers
+        providers = create_providers("local")
+        return providers["llm_fn"]
     return make_llm_fn(timeout=60.0)
 
 
 def _build_rag_pipeline(llm_fn) -> RAGPipeline:
     """Построить RAG-пайплайн со структурированными ответами.
 
+    LLM_MODE=local  → OllamaEmbedder + OllamaReranker (без API-ключей)
+    LLM_MODE=cloud  → QwenEmbedder + ThresholdFilter
+
     Returns:
         RAGPipeline с Hybrid-поиском и structured responses.
     """
-    embedding_provider = EmbeddingProvider.create("qwen")
+    if _LLM_MODE == "local":
+        from src.providers.stack_config import create_providers
+        providers = create_providers("local")
+        embedding_provider = providers["embedder"]
+        reranker = providers["reranker"]
+        print(
+            f"[Bot] LOCAL mode: embedder={providers['embed_model']}, "
+            f"reranker={providers['rerank_model']}"
+        )
+    else:
+        embedding_provider = EmbeddingProvider.create("qwen")
+        reranker = ThresholdFilter(threshold=0.0)
+
     store = IndexStore(_DB_PATH)
 
     vector_retriever = VectorRetriever(store=store, embedder=embedding_provider)
@@ -84,7 +114,6 @@ def _build_rag_pipeline(llm_fn) -> RAGPipeline:
         vector_retriever=vector_retriever,
         bm25_retriever=bm25_retriever,
     )
-    reranker = ThresholdFilter(threshold=0.0)
 
     pipeline = RAGPipeline(
         retriever=retriever,
@@ -123,8 +152,16 @@ def _build_dialog_factory(rag_pipeline, llm_fn):
 
 
 def _build_index_manager() -> IndexManager:
-    """Создать IndexManager для AdminCLI."""
-    embedding_provider = EmbeddingProvider.create("qwen")
+    """Создать IndexManager для AdminCLI.
+
+    Использует тот же провайдер эмбеддингов, что и RAG-пайплайн.
+    """
+    if _LLM_MODE == "local":
+        from src.providers.stack_config import create_providers
+        providers = create_providers("local")
+        embedding_provider = providers["embedder"]
+    else:
+        embedding_provider = EmbeddingProvider.create("qwen")
     return IndexManager(
         db_path=_DB_PATH,
         embedding_provider=embedding_provider,
@@ -138,7 +175,8 @@ def _build_index_manager() -> IndexManager:
 def main() -> None:
     """Запустить support-бот."""
     print("=" * 60)
-    print("  Support Bot — День 25")
+    print("  Support Bot — День 27")
+    print(f"  Режим: {'LOCAL (Ollama)' if _LLM_MODE == 'local' else 'CLOUD'}")
     print("=" * 60)
 
     # Проверяем индекс

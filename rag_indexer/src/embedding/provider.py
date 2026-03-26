@@ -1,7 +1,8 @@
 """Провайдеры эмбеддингов (паттерн Strategy).
 
-Реализует два провайдера:
-- QwenEmbedder      — DashScope API (text-embedding-v3), urllib, батч до 25
+Реализует три провайдера:
+- QwenEmbedder        — DashScope API (text-embedding-v3), urllib, батч до 25
+- OllamaEmbedder      — локальная Ollama (/api/embed), без API-ключей
 - LocalRandomEmbedder — детерминированные псевдо-эмбеддинги для тестирования
 
 Graceful fallback: если DASHSCOPE_API_KEY не задан — автоматически
@@ -65,8 +66,8 @@ class EmbeddingProvider(ABC):
         """Фабричный метод: создать провайдер по имени.
 
         Args:
-            provider: "qwen" или "local".
-            **kwargs: Параметры провайдера (api_key, dimension, etc).
+            provider: "qwen", "ollama" или "local".
+            **kwargs: Параметры провайдера (api_key, dimension, model, base_url, etc).
 
         Returns:
             Экземпляр EmbeddingProvider.
@@ -74,6 +75,7 @@ class EmbeddingProvider(ABC):
         Notes:
             Если provider="qwen" и DASHSCOPE_API_KEY не задан —
             автоматически возвращается LocalRandomEmbedder.
+            provider="ollama" — локальный OllamaEmbedder, не требует API-ключей.
         """
         if provider == "qwen":
             api_key = kwargs.get("api_key") or os.environ.get("DASHSCOPE_API_KEY", "")
@@ -86,10 +88,21 @@ class EmbeddingProvider(ABC):
                 return LocalRandomEmbedder(**{k: v for k, v in kwargs.items() if k != "api_key"})
             return QwenEmbedder(api_key=api_key, **{k: v for k, v in kwargs.items() if k != "api_key"})
 
+        if provider == "ollama":
+            from .ollama_embedder import OllamaEmbedder
+            ollama_kwargs = {}
+            if "model" in kwargs:
+                ollama_kwargs["model"] = kwargs["model"]
+            if "base_url" in kwargs:
+                ollama_kwargs["base_url"] = kwargs["base_url"]
+            if "timeout" in kwargs:
+                ollama_kwargs["timeout"] = kwargs["timeout"]
+            return OllamaEmbedder(**ollama_kwargs)
+
         if provider == "local":
             return LocalRandomEmbedder(**kwargs)
 
-        raise ValueError(f"Неизвестный провайдер '{provider}'. Доступны: qwen, local")
+        raise ValueError(f"Неизвестный провайдер '{provider}'. Доступны: qwen, ollama, local")
 
 
 # ---------------------------------------------------------------------------

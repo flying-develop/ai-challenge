@@ -63,7 +63,19 @@ def cmd_index(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Провайдер эмбеддингов (graceful fallback)
-    provider = EmbeddingProvider.create("qwen", dimension=args.dimension)
+    embedder_name = getattr(args, "embedder", "qwen") or "qwen"
+    if embedder_name == "ollama":
+        import os as _os
+        ollama_kwargs = {}
+        embed_model = _os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        base_url = _os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        provider = EmbeddingProvider.create(
+            "ollama",
+            model=embed_model,
+            base_url=base_url,
+        )
+    else:
+        provider = EmbeddingProvider.create(embedder_name, dimension=args.dimension)
     print(f"[Embedding] Провайдер: {provider.model_name} (dim={provider.dimension})")
 
     # Выбор стратегий
@@ -120,7 +132,14 @@ def cmd_search(args: argparse.Namespace) -> None:
     print()
 
     # Эмбеддинг запроса
-    provider = EmbeddingProvider.create("qwen", dimension=args.dimension)
+    embedder_name = getattr(args, "embedder", "qwen") or "qwen"
+    if embedder_name == "ollama":
+        import os as _os
+        embed_model = _os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        base_url = _os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        provider = EmbeddingProvider.create("ollama", model=embed_model, base_url=base_url)
+    else:
+        provider = EmbeddingProvider.create(embedder_name, dimension=args.dimension)
     print(f"[Search] Генерация эмбеддинга запроса ({provider.model_name})...", end=" ", flush=True)
     query_vectors = provider.embed_texts([query])
     query_vector = query_vectors[0]
@@ -199,6 +218,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1024,
         help="Размерность эмбеддингов (по умолчанию 1024)",
     )
+    p_index.add_argument(
+        "--embedder",
+        choices=["qwen", "ollama", "local"],
+        default="qwen",
+        help="Провайдер эмбеддингов: qwen (DashScope) | ollama (локальный) | local (random). По умолчанию: qwen",
+    )
 
     # --- compare ---
     p_compare = subparsers.add_parser("compare", help="Сравнить стратегии (ASCII-таблица)")
@@ -216,6 +241,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Фильтр по стратегии",
     )
     p_search.add_argument("--dimension", type=int, default=1024, help="Размерность эмбеддингов")
+    p_search.add_argument(
+        "--embedder",
+        choices=["qwen", "ollama", "local"],
+        default="qwen",
+        help="Провайдер эмбеддингов: qwen | ollama | local",
+    )
 
     return parser
 
