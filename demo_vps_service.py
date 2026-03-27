@@ -333,41 +333,46 @@ def test_max_context(
 
 
 def test_rate_limit(
-    base_url: str, auth_header: str | None, model: str, n_requests: int = 15
+    base_url: str, auth_header: str | None, model: str, n_requests: int = 30
 ) -> TestResult:
-    """Быстрые запросы подряд — ожидаем 429 при наличии rate limit в nginx."""
+    """Быстрые запросы подряд — ожидаем 503/429 при наличии rate limit в nginx.
+
+    nginx с limit_req возвращает 503 мгновенно (до бэкенда),
+    поэтому даже с медленной моделью этот тест отрабатывает быстро.
+    """
     url = base_url.rstrip("/") + "/api/generate"
     payload = {
         "model": model,
         "prompt": "1+1=?",
         "stream": False,
-        "options": {"num_predict": 5, "temperature": 0.0},
+        "options": {"num_predict": 1, "temperature": 0.0},
     }
 
     statuses: list[int] = []
-    first_429_at: int | None = None
+    first_limited_at: int | None = None
 
     for i in range(n_requests):
-        status = _post_raw_status(url, payload, auth_header, timeout=5.0)
+        # Без паузы — максимально быстро, чтобы пробить burst
+        status = _post_raw_status(url, payload, auth_header, timeout=3.0)
         statuses.append(status)
-        if status == 429 and first_429_at is None:
-            first_429_at = i + 1
-        # Небольшая пауза чтобы не положить сервер
-        time.sleep(0.1)
+        if status in (429, 503) and first_limited_at is None:
+            first_limited_at = i + 1
 
     ok_count = statuses.count(200)
-    rate_limited = statuses.count(429)
+    limited_count = sum(1 for s in statuses if s in (429, 503))
 
-    if first_429_at is not None:
+    if first_limited_at is not None:
         passed = True
-        details = f"Rate limit сработал на запросе #{first_429_at} | 200:{ok_count} 429:{rate_limited}"
+        details = (
+            f"Rate limit сработал на запросе #{first_limited_at} | "
+            f"200:{ok_count} limited:{limited_count}/{n_requests}"
+        )
     elif all(s == 200 for s in statuses):
-        # Нет rate limit настроен — это нормально для прямого Ollama
         passed = True
         details = f"Rate limit не настроен (все {ok_count}/{n_requests} — 200 OK) — добавьте nginx для продакшна"
     else:
         passed = False
-        details = f"Неожиданные статусы: {set(statuses)}"
+        details = f"Неожиданные статусы: {dict((s, statuses.count(s)) for s in set(statuses))}"
 
     return TestResult(name=f"Rate Limit ({n_requests} req)", passed=passed, details=details)
 
