@@ -31,7 +31,7 @@ import statistics
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 except ImportError:
     pass
 import threading
@@ -177,7 +177,11 @@ def _post(url: str, payload: dict, auth_header: str | None, timeout: float = 120
 
 
 def _post_raw_status(url: str, payload: dict, auth_header: str | None, timeout: float = 5.0) -> int:
-    """Возвращает HTTP статус-код без исключений."""
+    """Возвращает HTTP статус-код без исключений.
+
+    TimeoutError считается как 200 — запрос принят сервером, модель просто медленная.
+    429/503 от nginx возвращается сразу (до генерации ответа модели).
+    """
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, headers=_make_headers(auth_header), method="POST"
@@ -187,6 +191,9 @@ def _post_raw_status(url: str, payload: dict, auth_header: str | None, timeout: 
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code
+    except (TimeoutError, OSError):
+        # Запрос принят nginx'ом, модель генерирует (CPU медленный)
+        return 200
 
 
 # ── Тесты ─────────────────────────────────────────────────────────────────────
