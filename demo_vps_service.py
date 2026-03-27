@@ -63,7 +63,7 @@ DEPLOY_GUIDE = """
 
 ━━━ 3. Загрузить модель ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    ollama pull qwen3:4b               # ~2.6GB, Q4_K_M
+    ollama pull qwen3.5:4b               # ~2.6GB, Q4_K_M
     ollama pull nomic-embed-text      # 274MB embeddings
     curl http://localhost:11434/api/tags   # проверка
 
@@ -105,7 +105,7 @@ DEPLOY_GUIDE = """
 
     curl http://<VPS_IP>/health
     curl -u llmuser:PASSWORD http://<VPS_IP>/v1/api/generate \\
-      -d '{\"model\":\"qwen3:4b\",\"prompt\":\"Hello\",\"stream\":false}'
+      -d '{\"model\":\"qwen3.5:4b\",\"prompt\":\"Hello\",\"stream\":false}'
 
 ━━━ 6. Запуск этого демо ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -400,7 +400,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default=None,
-        help="Имя модели (по умолчанию: qwen3:4b или из env OLLAMA_LLM_MODEL)",
+        help="Имя модели (по умолчанию: qwen3.5:4b или из env OLLAMA_LLM_MODEL)",
     )
     args = parser.parse_args()
 
@@ -430,7 +430,7 @@ def main() -> None:
         auth_str = "с basic auth" if auth_header else "без auth"
         mode = f"VPS ({base_url}, {auth_str})"
 
-    model = args.model or os.environ.get("OLLAMA_LLM_MODEL", "qwen3:4b")
+    model = args.model or os.environ.get("OLLAMA_LLM_MODEL", "qwen3.5:4b")
 
     print()
     print("╔══════════════════════════════════════════════════════════════════╗")
