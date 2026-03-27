@@ -28,6 +28,12 @@ import argparse
 import json
 import os
 import statistics
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import threading
 import time
 import urllib.error
