@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import urllib.error
@@ -42,6 +43,8 @@ class OllamaHttpClient:
         options:  Параметры генерации для /api/chat options
                   (temperature, num_ctx, num_predict, top_p, seed и др.).
                   Если None — Ollama использует параметры по умолчанию.
+        auth:     Пара (username, password) для HTTP Basic Auth.
+                  Используется при подключении к удалённому серверу через nginx.
     """
 
     def __init__(
@@ -50,11 +53,17 @@ class OllamaHttpClient:
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
         options: dict | None = None,
+        auth: tuple[str, str] | None = None,
     ) -> None:
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._options = options or {}
+        self._auth_header = (
+            "Basic " + base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+            if auth
+            else None
+        )
 
     @property
     def context_limit(self) -> int:
@@ -92,10 +101,13 @@ class OllamaHttpClient:
 
         body = json.dumps(payload).encode("utf-8")
 
+        headers = {"Content-Type": "application/json"}
+        if self._auth_header:
+            headers["Authorization"] = self._auth_header
         req = urllib.request.Request(
             f"{self._base_url}/api/chat",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
 
@@ -136,7 +148,10 @@ class OllamaHttpClient:
             True если сервер отвечает и модель присутствует в списке.
         """
         try:
-            req = urllib.request.Request(f"{self._base_url}/api/tags")
+            headers = {}
+            if self._auth_header:
+                headers["Authorization"] = self._auth_header
+            req = urllib.request.Request(f"{self._base_url}/api/tags", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             models = [m["name"] for m in data.get("models", [])]
