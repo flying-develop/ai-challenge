@@ -51,3 +51,10 @@
 - args: -m mcp_server.journal_server
 - описание: Аудит-журнал этапов исследования в SQLite (log_stage, get_log)
 - требует: ничего (SQLite из stdlib, БД создаётся автоматически)
+
+## git_server
+- transport: stdio
+- command: python
+- args: mcp_server/git_server.py
+- описание: Git-операции для ассистента разработчика
+- требует: git в PATH и локальный git-репозиторий
