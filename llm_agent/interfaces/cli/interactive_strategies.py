@@ -27,7 +27,8 @@
     /branches              — список веток и checkpoint-ов
 
     /clear                 — сбросить историю
-    /help                  — показать справку
+    /help                  — справка по проекту (README + docs + git)
+    /help commands         — справка по CLI-командам
     exit, quit             — выход
 """
 
@@ -57,6 +58,7 @@ from llm_agent.application.context_strategies import (
     StickyFactsStrategy,
 )
 from llm_agent.application.strategy_agent import StrategyAgent
+from llm_agent.commands import HelpCommandHandler
 from llm_agent.core.invariant_loader import InvariantLoader
 from llm_agent.infrastructure.llm_factory import (
     DEFAULT_MODELS,
@@ -267,7 +269,8 @@ RAG-ПОИСК (документы podkop-wiki):
 
 ОБЩИЕ:
   /clear                 — сбросить историю диалога
-  /help                  — эта справка
+  /help                  — справка по проекту (README + docs + git)
+  /help commands         — эта справка по CLI
   exit / quit            — выход
 """
 
@@ -2174,6 +2177,7 @@ def handle_command(
     invariant_loader: InvariantLoader | None = None,
     mcp_state: dict | None = None,
     rag_state: dict | None = None,
+    help_handler: HelpCommandHandler | None = None,
 ) -> tuple[int, bool]:
     """Обработать команду. Возвращает (strategy_num, was_handled)."""
     try:
@@ -2187,7 +2191,13 @@ def handle_command(
 
     # ---- Справка ----
     if command == "/help":
-        print(HELP_TEXT)
+        query = " ".join(parts[1:]).strip()
+        if query.lower() in {"commands", "cli", "?"}:
+            print(HELP_TEXT)
+        elif help_handler is None:
+            print("Project help не настроен. Используйте /help commands.")
+        else:
+            print(help_handler.handle(query))
         return current_strategy_num, True
 
     # ---- Провайдеры ----
@@ -2709,6 +2719,16 @@ def run_interactive(provider: str, model: str | None) -> None:
         "last_structured_response": None,
         "last_confidence": None,
     }
+    help_handler = HelpCommandHandler(
+        llm_agent=agent,
+        project_root=_project_root,
+        rag_db_path=os.environ.get(
+            "PROJECT_DOCS_DB_PATH",
+            os.path.join(_project_root, "project_docs.db"),
+        ),
+        repo_path=os.environ.get("PROJECT_REPO_PATH", _project_root),
+        mcp_config_path=os.path.join(_project_root, "config", "mcp-servers.md"),
+    )
 
     _inv_cats = invariant_loader.categories
     _inv_req = sum(len(c.required) for c in _inv_cats)
@@ -2721,7 +2741,7 @@ def run_interactive(provider: str, model: str | None) -> None:
     print(f"  Модель    : {model_name}")
     print(f"  Стратегия : [{current_strategy_num}] {STRATEGY_NAMES[current_strategy_num]}")
     print(f"  Инварианты: {_inv_req} обязательных, {_inv_rec} рекомендуемых (/invariants)")
-    print(f"\n  Введите /help для списка команд.\n")
+    print(f"\n  Введите /help для справки по проекту или /help commands для CLI-команд.\n")
 
     while True:
         try:
@@ -2764,6 +2784,7 @@ def run_interactive(provider: str, model: str | None) -> None:
                 invariant_loader=invariant_loader,
                 mcp_state=mcp_state,
                 rag_state=rag_state,
+                help_handler=help_handler,
             )
             if handled:
                 continue
