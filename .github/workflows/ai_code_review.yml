@@ -1,0 +1,99 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    name: AI Code Review (Day 32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Нужна полная история для корректного diff
+          fetch-depth: 0
+
+      # ── 2. Setup Python ─────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install dependencies ─────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --quiet httpx python-dotenv
+
+      # ── 4. Get PR diff ──────────────────────────────────────────────────────
+      - name: Get PR diff
+        id: get-diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Получаем diff через GitHub CLI
+          gh pr diff ${{ github.event.pull_request.number }} > /tmp/pr.diff
+
+          # Показываем статистику
+          echo "Diff size: $(wc -c < /tmp/pr.diff) bytes"
+          echo "Changed files:"
+          gh pr view ${{ github.event.pull_request.number }} --json files \
+            --jq '.files[].path' | head -20
+
+          # Список файлов для скрипта
+          FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files \
+            --jq '[.files[].path] | join(",")' 2>/dev/null || echo "")
+          echo "changed_files=$FILES" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Run AI Review ────────────────────────────────────────────────────
+      - name: Run AI Code Review
+        id: review
+        env:
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          QWEN_MODEL: qwen-plus
+          QWEN_BASE_URL: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+          # RAG: если есть project_docs.db в репо — использует его
+          RAG_DB_PATH: ${{ github.workspace }}/project_docs.db
+        run: |
+          # Запускаем ревью (markdown в stdout, логи в stderr)
+          python day32_code_review.py \
+            --diff-file /tmp/pr.diff \
+            --files "${{ steps.get-diff.outputs.changed_files }}" \
+            --format markdown \
+            > /tmp/review.md 2>&1 || {
+              echo "## 🤖 AI Code Review" > /tmp/review.md
+              echo "" >> /tmp/review.md
+              echo "⚠️ Review failed. Check workflow logs." >> /tmp/review.md
+            }
+
+          echo "=== REVIEW ==="
+          cat /tmp/review.md
+
+      # ── 6. Post PR Comment ──────────────────────────────────────────────────
+      - name: Post review as PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Удаляем предыдущий комментарий от бота (если есть)
+          EXISTING_COMMENT=$(gh pr view ${{ github.event.pull_request.number }} \
+            --json comments \
+            --jq '.comments[] | select(.body | startswith("## 🤖 AI Code Review")) | .id' \
+            2>/dev/null | head -1 || echo "")
+
+          if [ -n "$EXISTING_COMMENT" ]; then
+            gh api --method DELETE \
+              "/repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT" \
+              2>/dev/null || true
+          fi
+
+          # Публикуем новый комментарий
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file /tmp/review.md
