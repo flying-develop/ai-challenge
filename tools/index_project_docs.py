@@ -12,6 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from rag_indexer.src.chunking.strategies import STRATEGIES
 from rag_indexer.src.embedding.provider import EmbeddingProvider
 from rag_indexer.src.pipeline import IndexingPipeline
@@ -23,7 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="index_project_docs",
         description="Индексировать README + docs проекта в отдельный RAG-индекс.",
     )
-    parser.add_argument("--docs-dir", required=True, help="Путь к docs проекта.")
+    default_docs_dir = os.environ.get("DOCUMAKER_DOCS_PATH", "")
+    parser.add_argument(
+        "--docs-dir",
+        required=not bool(default_docs_dir),
+        default=default_docs_dir or None,
+        help="Путь к docs проекта. Можно задать через DOCUMAKER_DOCS_PATH в .env.",
+    )
     parser.add_argument(
         "--readme",
         help="Путь к README.md проекта. По умолчанию: соседний с docs-dir README.md.",
