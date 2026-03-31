@@ -12,6 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from rag_indexer.src.chunking.strategies import STRATEGIES
 from rag_indexer.src.embedding.provider import EmbeddingProvider
 from rag_indexer.src.pipeline import IndexingPipeline
