@@ -58,3 +58,10 @@
 - args: mcp_server/git_server.py
 - описание: Git-операции для ассистента разработчика
 - требует: git в PATH и локальный git-репозиторий
+
+## crm_server
+- transport: stdio
+- command: python
+- args: mcp_server/crm_server.py
+- описание: CRM для системы поддержки пользователей documaker (тикеты, пользователи, история)
+- требует: ничего (SQLite из stdlib, crm.db создаётся автоматически)
